@@ -81,10 +81,7 @@ topic_agent:
       site: "sbsstar.net"
       lang: "en"
       query_suffix: "BTS BLACKPINK NewJeans IVE aespa Stray Kids SEVENTEEN TXT ENHYPEN"
-    - name: "Korea JoongAng Daily"
-      site: "koreajoongangdaily.joins.com"
-      lang: "en"
-      query_suffix: "BTS BLACKPINK NewJeans aespa IVE K-pop"
+    # Korea JoongAng Daily 暂停启用：综合新闻源会混入社会、商业和生活内容。
 
   # 通用搜索关键词 — 已禁用（无站点限制，返回内容不精准）
   # 如需启用，在 search_sources 里追加带 site: 的源

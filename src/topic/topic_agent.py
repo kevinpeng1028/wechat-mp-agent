@@ -486,7 +486,7 @@ class TopicAgent(BaseAgent):
     _SKIP_URL_PATTERNS = [
         "/category/", "/cat/", "/tag/", "/tags/",
         "/video/", "/videos/", "/playlist/",
-        "/news/", "/archives/", "/archive/",
+        "/archives/", "/archive/",
         "/section/", "/topic/", "/channel/",
         "/page/", "/p=",
     ]
@@ -503,9 +503,10 @@ class TopicAgent(BaseAgent):
         """
         硬过滤：只保留韩国男团/女团/成员的音乐动态。
         规则：
-        1. 标题、URL 或搜索摘要命中非音乐排除词，直接过滤。
+        1. 只有标题或 URL 命中非音乐排除词，才直接过滤。
         2. 只有标题、URL 或搜索摘要明确命中强音乐关键词，才允许进入评分。
-        3. 不读取 raw_content，避免正文模板、侧栏和推荐链接造成误判。
+        3. 不读取正文或 raw_content，避免模板、侧栏和推荐链接造成误判。
+        4. 标题/URL 同时命中目标艺人和强音乐词时，记录为强音乐优先保留。
         """
         filtered = []
 
@@ -526,7 +527,6 @@ class TopicAgent(BaseAgent):
             search_summary = (
                 article.get("summary", "")
                 or article.get("description", "")
-                or article.get("content", "")
                 or ""
             )
 
@@ -538,21 +538,52 @@ class TopicAgent(BaseAgent):
                 logger.info(f"[选题Agent] 🚫 跳过聚合页/标签页: {title[:80]} | {url[:80]}")
                 continue
 
-            # 排除词优先：即使同时出现艺人名或音乐词，也不能进入评分
-            if any(
-                contains_keyword(qualification_text, keyword)
-                for keyword in STRICT_NON_MUSIC_BLOCK_KEYWORDS
-            ):
-                logger.info(f"[选题Agent] 🚫 跳过非音乐内容/影视恋情纪录片声誉榜体育商业: {title[:80]} | {url[:80]}")
+            blocked_keyword = next(
+                (
+                    keyword
+                    for keyword in STRICT_NON_MUSIC_BLOCK_KEYWORDS
+                    if contains_keyword(title_url, keyword)
+                ),
+                None,
+            )
+            if blocked_keyword:
+                logger.info(
+                    f"[选题Agent] 🚫 过滤非音乐标题/URL "
+                    f"(命中 '{blocked_keyword}'): {title[:80]} | {url[:80]}"
+                )
                 continue
 
-            if not any(
-                contains_keyword(qualification_text, keyword)
-                for keyword in STRONG_KPOP_MUSIC_KEYWORDS
-            ):
-                logger.info(f"[选题Agent] 🚫 跳过非强音乐动态: {title[:80]} | {url[:80]}")
+            music_keyword = next(
+                (
+                    keyword
+                    for keyword in STRONG_KPOP_MUSIC_KEYWORDS
+                    if contains_keyword(qualification_text, keyword)
+                ),
+                None,
+            )
+            if not music_keyword:
+                logger.info(
+                    f"[选题Agent] 🚫 过滤：标题/URL/摘要未命中强音乐词: "
+                    f"{title[:80]} | {url[:80]}"
+                )
                 continue
 
+            target_hits = [
+                star
+                for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, title_url)
+            ]
+            if target_hits:
+                logger.info(
+                    f"[选题Agent] ✅ 强音乐优先保留 "
+                    f"(艺人={target_hits[:3]}, 音乐词='{music_keyword}'): "
+                    f"{title[:80]}"
+                )
+            else:
+                logger.info(
+                    f"[选题Agent] ✅ 音乐信号通过 "
+                    f"(音乐词='{music_keyword}'，待目标艺人过滤): {title[:80]}"
+                )
             filtered.append(article)
 
         return filtered
@@ -587,10 +618,11 @@ class TopicAgent(BaseAgent):
             title_lower = title.lower()
             content_text = content + " " + raw
 
-            # 跳过聚合页/分类页（URL 含 /category/ /tag/ /video/ 等）
+            # 仅跳过明确的聚合页/分类页；/news/<slug> 是正常文章链接
             if self._is_aggregate_page(url):
                 logger.info(
-                    f"[选题Agent] 跳过聚合页: '{title[:30]}' | {url[:60]}"
+                    f"[选题Agent] 🚫 顶流过滤：明确聚合页 URL: "
+                    f"'{title[:30]}' | {url[:60]}"
                 )
                 continue
 
@@ -616,7 +648,8 @@ class TopicAgent(BaseAgent):
             if title_star_hits:
                 filtered.append(c)
                 logger.info(
-                    f"[选题Agent] ✅ 标题命中顶流明星 {title_star_hits}: '{title[:40]}'"
+                    f"[选题Agent] ✅ 顶流过滤通过：标题命中目标艺人 "
+                    f"{title_star_hits}: '{title[:60]}'"
                 )
                 continue
 
@@ -630,11 +663,13 @@ class TopicAgent(BaseAgent):
                 # 内容中命中2个以上不同明星，可能是真正娱乐新闻
                 filtered.append(c)
                 logger.info(
-                    f"[选题Agent] ✅ 内容命中{len(content_star_hits)}个顶流明星: '{title[:40]}'"
+                    f"[选题Agent] ✅ 顶流过滤通过：内容命中"
+                    f"{len(content_star_hits)}个目标艺人: '{title[:60]}'"
                 )
             else:
                 logger.info(
-                    f"[选题Agent] 跳过(标题未命中且内容仅命中{len(content_star_hits)}个明星): '{title[:40]}'"
+                    f"[选题Agent] 🚫 顶流过滤：标题未命中目标艺人，"
+                    f"内容仅命中{len(content_star_hits)}个: '{title[:60]}'"
                 )
 
         return filtered
