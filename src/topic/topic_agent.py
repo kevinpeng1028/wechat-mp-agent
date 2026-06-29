@@ -70,6 +70,11 @@ STRONG_KPOP_MUSIC_KEYWORDS = [
 
 # 这些内容即使命中爱豆名字，也默认不做
 STRICT_NON_MUSIC_BLOCK_KEYWORDS = [
+    "subway", "cafeteria", "meal", "restaurant",
+    "politics", "political", "election",
+    "business", "economy", "economic", "finance", "financial",
+    "football", "soccer", "sports", "world cup",
+    "semiconductor", "chip cluster",
     "actor", "actress", "drama", "movie", "film", "netflix", "series",
     "documentary", "docu", "reality show", "variety show", "broadcast",
     "to star in", "cast", "casting", "growth documentary",
@@ -185,26 +190,8 @@ class TopicAgent(BaseAgent):
                 error="未找到24小时内的候选文章（严格过滤，不回退到48h）",
             )
 
-        # 限制候选数量（评分成本考虑）
-        if len(fresh_candidates) > self.candidate_count * 3:
-            # 先用简单启发式排序，取top N
-            fresh_candidates = sorted(
-                fresh_candidates,
-                key=lambda c: (self._hours_ago(c), -(c.get("score", 0) or 0))
-            )[:self.candidate_count * 3]
-
-        # Step 2.5: 顶流明星过滤 — 只保留提及顶流明星的文章
-        fresh_candidates = self._filter_top_stars(fresh_candidates)
-        logger.info(f"[选题Agent] 顶流明星过滤后: {len(fresh_candidates)} 篇")
-
-        if not fresh_candidates:
-            return AgentResult(
-                status=AgentStatus.FAILED,
-                agent_name=self.name,
-                error="未找到提及顶流明星的候选文章",
-            )
-
-        # Step 2.6: 音乐相关性硬过滤
+        # Step 2.5: 音乐相关性硬过滤。必须在候选截断和评分之前执行，
+        # 避免生活、社会或商业新闻占用候选名额。
         # 只保留韩国男团/女团/成员的音乐动态；过滤影视、恋情、分手、演员八卦、聚合页。
         before_music_filter = len(fresh_candidates)
         fresh_candidates = self._filter_kpop_music_topics(fresh_candidates)
@@ -218,6 +205,24 @@ class TopicAgent(BaseAgent):
                 status=AgentStatus.FAILED,
                 agent_name=self.name,
                 error="未找到合格的K-pop音乐类候选文章；影视/恋情/分手/演员八卦已过滤",
+            )
+
+        # 只截断已经通过音乐硬过滤的候选（评分成本考虑）
+        if len(fresh_candidates) > self.candidate_count * 3:
+            fresh_candidates = sorted(
+                fresh_candidates,
+                key=lambda c: (self._hours_ago(c), -(c.get("score", 0) or 0))
+            )[:self.candidate_count * 3]
+
+        # Step 2.6: 目标韩国男团、女团及成员过滤
+        fresh_candidates = self._filter_top_stars(fresh_candidates)
+        logger.info(f"[选题Agent] 顶流明星过滤后: {len(fresh_candidates)} 篇")
+
+        if not fresh_candidates:
+            return AgentResult(
+                status=AgentStatus.FAILED,
+                agent_name=self.name,
+                error="未找到涉及目标韩国男团、女团或成员的音乐候选文章",
             )
 
         # Step 3: 综合评分（15个字段）
@@ -260,7 +265,7 @@ class TopicAgent(BaseAgent):
                 error="所有候选文章均不满足 ready 条件（图文一致性/风险/重复）",
             )
 
-        # Step 6: 选最高2篇
+        # Step 6: 最多选配置数量；只有 1 篇合格时就只输出 1 篇
         selected = ready_articles[:self.selected_count]
 
         # 标记头条/次条
@@ -498,70 +503,53 @@ class TopicAgent(BaseAgent):
         """
         硬过滤：只保留韩国男团/女团/成员的音乐动态。
         规则：
-        1. 标题/URL 明确是纪录片、影视、恋情、声誉榜、体育、商业新闻，直接过滤。
-        2. 标题/URL 明确是专辑、回归、MV、概念照、舞台、演唱会、榜单，优先保留。
-        3. 不用网页全文里的 cast / broadcast 等模板词误杀音乐文章。
+        1. 标题、URL 或搜索摘要命中非音乐排除词，直接过滤。
+        2. 只有标题、URL 或搜索摘要明确命中强音乐关键词，才允许进入评分。
+        3. 不读取 raw_content，避免正文模板、侧栏和推荐链接造成误判。
         """
         filtered = []
 
-        hard_block_title_keywords = [
-            "brand reputation", "reputation rankings", "star brand reputation",
-            "documentary", "growth documentary", "to star in",
-            "actor", "actress", "drama", "movie", "film", "netflix", "series",
-            "dating", "date", "breakup", "break up", "boyfriend", "girlfriend",
-            "lover", "relationship", "couple", "marriage", "divorce", "rumor",
-            "scandal", "kiss", "romance", "wedding", "pregnant",
-            "football", "world cup", "semiconductor", "chip cluster",
-            "品牌声誉", "声誉榜", "纪录片", "演员", "韩剧", "电视剧", "电影",
-            "恋情", "约会", "分手", "男友", "女友", "恋人", "情侣",
-            "结婚", "离婚", "传闻", "绯闻", "恋爱", "足球", "世界杯", "半导体",
-        ]
-
-        strong_music_title_keywords = [
-            "comeback", "album", "single", "ep", "mini album", "full album",
-            "music video", "mv", "teaser", "concept photo", "concept photos",
-            "tracklist", "stage", "performance", "concert", "tour",
-            "fanmeeting", "fan meeting", "showcase", "festival",
-            "music bank", "inkigayo", "m countdown",
-            "billboard", "world albums", "melon", "spotify", "chart",
-            "debut", "release", "dance practice",
-            "回归", "专辑", "单曲", "新歌", "MV", "音乐视频", "舞台",
-            "打歌", "演唱会", "巡演", "见面会", "预告", "概念照",
-            "音源", "榜单", "出道",
-        ]
+        def contains_keyword(text: str, keyword: str) -> bool:
+            """英文关键词按单词边界匹配，避免 mv/ep 在普通 URL 中误命中。"""
+            keyword = keyword.lower()
+            if re.fullmatch(r"[a-z0-9][a-z0-9 -]*", keyword):
+                escaped = re.escape(keyword).replace(r"\ ", r"\s+")
+                return re.search(
+                    rf"(?<![a-z0-9]){escaped}s?(?![a-z0-9])",
+                    text,
+                ) is not None
+            return keyword in text
 
         for article in candidates:
             title = article.get("title", "") or ""
             url = article.get("url", "") or ""
-            content = (
-                article.get("content", "")
-                or article.get("raw_content", "")
-                or article.get("summary", "")
+            search_summary = (
+                article.get("summary", "")
                 or article.get("description", "")
+                or article.get("content", "")
                 or ""
             )
-            source = article.get("source", "") or article.get("source_name", "") or ""
 
             title_url = f"{title} {url}".lower()
-            text_all = f"{title} {url} {content} {source}".lower()
+            qualification_text = f"{title} {url} {search_summary}".lower()
 
             # 聚合页、标签页、作者页、档案页不做
             if any(p in title_url for p in BAD_TOPIC_PATTERNS):
                 logger.info(f"[选题Agent] 🚫 跳过聚合页/标签页: {title[:80]} | {url[:80]}")
                 continue
 
-            # 标题/URL 明确是非音乐内容，直接过滤
-            if any(k.lower() in title_url for k in hard_block_title_keywords):
+            # 排除词优先：即使同时出现艺人名或音乐词，也不能进入评分
+            if any(
+                contains_keyword(qualification_text, keyword)
+                for keyword in STRICT_NON_MUSIC_BLOCK_KEYWORDS
+            ):
                 logger.info(f"[选题Agent] 🚫 跳过非音乐内容/影视恋情纪录片声誉榜体育商业: {title[:80]} | {url[:80]}")
                 continue
 
-            # 标题/URL 明确是音乐动态，直接保留
-            strong_music_in_title = any(k.lower() in title_url for k in strong_music_title_keywords)
-
-            # 如果标题不明显，再看全文是否有强音乐关键词
-            strong_music_in_text = any(k.lower() in text_all for k in strong_music_title_keywords)
-
-            if not (strong_music_in_title or strong_music_in_text):
+            if not any(
+                contains_keyword(qualification_text, keyword)
+                for keyword in STRONG_KPOP_MUSIC_KEYWORDS
+            ):
                 logger.info(f"[选题Agent] 🚫 跳过非强音乐动态: {title[:80]} | {url[:80]}")
                 continue
 
