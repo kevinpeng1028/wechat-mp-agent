@@ -1,0 +1,413 @@
+# ============================================
+# 微信公众号全自动运营 Agent 配置文件
+# 韩国娱乐圈方向 - 每日3篇预选 → 评分 → 最优2篇入草稿箱
+# ============================================
+
+# ---- 全局配置 ----
+app:
+  name: "Aido"
+  version: "2.0.0"
+  debug: true
+  log_level: "INFO"
+  timezone: "Asia/Shanghai"
+
+# ---- LLM 配置 ----
+llm:
+  provider: "openai"
+  api_key: "${OPENAI_API_KEY}"
+  base_url: "${OPENAI_BASE_URL}"
+  model: "deepseek-v4-flash"
+  cheap_model: "deepseek-v4-flash"
+  max_tokens: 4096
+  temperature:
+    writing: 0.7
+    topic: 0.5
+    seo: 0.3
+    scoring: 0.3
+
+# ---- Tavily 搜索 API ----
+tavily:
+  api_key: "${TAVILY_API_KEY}"
+  base_url: "https://api.tavily.com"
+  search_depth: "advanced"
+  max_results: 6
+  include_images: true
+  include_image_descriptions: true
+  include_raw_content: "markdown"
+  topic: "news"           # 新闻模式，确保时效性
+  time_range: "day"        # 过去24小时：day/week/month/year
+
+# ---- 微信公众号 API ----
+wechat_mp:
+  app_id: "${WECHAT_MP_APPID}"
+  app_secret: "${WECHAT_MP_APPSECRET}"
+  token: "${WECHAT_MP_TOKEN}"
+  encoding_aes_key: "${WECHAT_MP_AES_KEY}"
+  base_url: "https://api.weixin.qq.com"
+  publish:
+    auto_publish: false
+    require_review: true
+    scheduled_time: null
+
+# ---- 触发层 ----
+trigger:
+  schedule:
+    enabled: true
+    cron: "0 17 * * *"       # 每天下午5点（北京时间）
+  hot_event:
+    enabled: false
+    check_interval_minutes: 60
+    threshold_score: 8000
+
+# ---- 选题 Agent 配置 ----
+topic_agent:
+  # 韩国娱乐媒体搜索源（site: 搜索限定）
+  # 聚焦 TOP 5 媒体 + TOP 10 男团/女团关键词
+  search_sources:
+    # ---- TOP 5 韩国娱乐媒体 ----
+    - name: "Soompi"
+      site: "soompi.com"
+      lang: "en"
+      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM"
+    - name: "AllKpop"
+      site: "allkpop.com"
+      lang: "en"
+      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM"
+    - name: "Koreaboo"
+      site: "koreaboo.com"
+      lang: "en"
+      query_suffix: "BTS BLACKPINK NewJeans aespa IVE LESSERAFIM Stray Kids SEVENTEEN TXT"
+    - name: "SBS Star"
+      site: "sbsstar.net"
+      lang: "en"
+      query_suffix: "BTS BLACKPINK NewJeans IVE aespa Stray Kids SEVENTEEN TXT ENHYPEN"
+    - name: "Korea JoongAng Daily"
+      site: "koreajoongangdaily.joins.com"
+      lang: "en"
+      query_suffix: "BTS BLACKPINK NewJeans aespa IVE K-pop"
+
+  # 通用搜索关键词 — 已禁用（无站点限制，返回内容不精准）
+  # 如需启用，在 search_sources 里追加带 site: 的源
+  general_keywords: []
+
+  # 额外搜索源（默认禁用，需手动启用）
+  # 如需更多素材来源，将下方列表内容合并到 search_sources
+  search_sources_extra:
+    - name: "Koreaboo"
+      site: "koreaboo.com"
+      lang: "en"
+      query_suffix: "BTS BLACKPINK NewJeans K-pop idol"
+    - name: "SBS Star"
+      site: "sbsstar.net"
+      lang: "en"
+      query_suffix: "BTS BLACKPINK K-pop idol news"
+    - name: "Korea JoongAng Daily"
+      site: "koreajoongangdaily.joins.com"
+      lang: "en"
+      query_suffix: "BTS BLACKPINK K-pop idol"
+    - name: "Dispatch"
+      site: "dispatch.co.kr"
+      lang: "ko"
+      query_suffix: "BTS BLACKPINK 아이돌 사진"
+    - name: "Naver Entertainment"
+      site: "entertain.naver.com"
+      lang: "ko"
+      query_suffix: "BTS BLACKPINK 아이돌 연예"
+
+  # 搜索参数
+  search:
+    candidate_count: 10          # 严格过滤后扩大候选池，避免只剩重复文章
+    selected_count: 2           # 仍然选择头条+次条
+    freshness_hours: 24         # 只选24小时内的素材
+    min_images_per_article: 1   # 每篇文章至少需要1张图
+    max_images_per_article: 4   # 每篇文章最多4张图，必须强相关
+
+  # 综合评分权重（15个评分字段）
+  scoring:
+    weights:
+      topic_heat_score: 0.15          # 话题热度
+      freshness_score: 0.15           # 时效性
+      image_quality_score: 0.10       # 图片质量
+      image_relevance_score: 0.20     # 图文相关性（重要！）
+      article_quality_score: 0.10     # 文章质量
+      predicted_read_score: 0.10      # 预测阅读量
+      risk_score: 0.10                # 风险评估（图片来源风险）
+      anti_ai_score: 0.10             # 反AI检测分数
+    # 图文一致性阈值：低于此分不允许进入草稿
+    image_consistency_threshold: 70
+    # 重复检测：最近N天内的文章不算
+    duplicate_check_days: 7
+
+# ---- 写作 Agent 配置 ----
+writer_agent:
+  # 韩国爱豆状态观察文风
+  default_style: "idol_observation"
+  styles:
+    idol_observation:
+      tone: "审美观察、克制、有余味"
+      length_range: [200, 800]       # 200-800字
+      structure: ["状态引入", "气质风格观察", "余味收尾"]
+
+  # 禁止编造规则
+  fabrication_rules:
+    - "如果输入里没有明确图片描述，禁止写任何具体画面"
+    - "禁止自行添加服装、动作、道具、场景、光线、表情、成员互动"
+    - "禁止写'照片里''那张''第一张''最后一张''六宫格'等具体图片描述"
+    - "禁止写'西瓜、白T、牛仔裤、短裤、小扇子、阳光、夕阳、台阶、棒球帽、比耶、合照'等未经输入提供的信息"
+
+  # 禁止口吻
+  banned_phrases:
+    - "姐妹们"
+    - "啊啊啊"
+    - "呜呜呜"
+    - "美到失语"
+    - "绝了"
+    - "封神"
+    - "鲨疯了"
+    - "我先磕为敬"
+    - "姐姐娶我"
+    - "快来评论区告诉我"
+    - "点赞在看"
+    - "嘿嘿"
+    - "#"
+    - "集美们"
+    - "太绝了"
+    - "原地去世"
+    - "我可以"
+    - "妈生好皮"
+    - "生图杀手"
+    - "撕漫脸"
+
+  # 允许的安全表达
+  safe_expressions:
+    - "这次更新"
+    - "这组近照"
+    - "状态"
+    - "气质"
+    - "风格"
+    - "近况"
+    - "亮相"
+    - "造型"
+
+  # 输出格式规则
+  format_rules:
+    no_markdown_headings: true     # 不输出 # 标题符号
+    no_hashtags: true              # 不输出 hashtag
+    no_emoji: true                 # 不输出 emoji
+    no_cta: true                   # 不硬性互动 CTA
+    no_title_repeat: true          # 标题不在正文重复
+    body_only: true                # 只输出正文
+
+  # 段落规则
+  paragraph_rules:
+    min_chars: 40                  # 段落最少40字
+    max_chars: 90                  # 段落最多90字
+    split_threshold: 120           # 超过120字自动拆分
+    short_paragraphs: true         # 短段落，适合公众号
+
+  # SEO 标题
+  seo_title:
+    max_length: 30
+    style: "观察类"               # 观察类标题，不是标题党
+
+  # 摘要
+  summary_max_chars: 120
+
+# ---- 排版 Agent 配置 ----
+formatter_agent:
+  theme: "idol_default"
+
+  # 默认排版标准（无模板时使用）
+  default_style:
+    # 整体规则
+    no_external_css: true
+    no_script: true
+    no_iframe: true
+    inline_style_only: true       # 所有样式用 inline style
+
+    # 正文段落
+    body:
+      font_size: "16px"
+      line_height: "1.9"
+      letter_spacing: "0.5px"
+      color: "#333333"
+      margin: "0 0 18px"
+      text_align: "justify"
+
+    # 段落容器
+    container:
+      margin: "0"
+      padding: "0"
+
+    # 图片
+    image:
+      width: "100%"
+      max_width: "100%"
+      display: "block"
+      margin: "18px auto"
+      border_radius: "6px"
+
+    # 图片说明
+    caption:
+      font_size: "13px"
+      line_height: "1.6"
+      color: "#999999"
+      text_align: "center"
+      margin: "-6px 0 18px"
+
+    # 导语段
+    intro:
+      font_size: "16px"
+      line_height: "1.9"
+      color: "#333333"
+      margin: "0 0 20px"
+      font_weight: "normal"
+
+    # 重点句
+    emphasis:
+      use_strong: true
+      no_overuse: true             # 不要过度加粗
+      no_large_color: true         # 不要大面积彩色文字
+
+  # 段落拆分规则
+  paragraph_split:
+    min_chars: 40
+    max_chars: 90
+    split_threshold: 120
+    no_markdown_headings: true
+    no_list_symbols: true
+    no_hashtags: true
+    no_extra_emoji: true
+    no_title_in_body: true
+
+  # 图片插入规则
+  image_insertion:
+    # 封面图：仅作为 thumb_media_id，默认不插入正文
+    cover_in_body: false
+    # 正文图位置规则
+    rules:
+      1_image: ["after_paragraph_1"]
+      2_images: ["after_paragraph_1", "after_middle"]
+      3_images: ["after_paragraph_1", "at_middle", "before_ending"]
+      4_images: ["after_paragraph_1", "at_1_3", "at_2_3", "before_ending"]
+
+  # 图文一致性检查
+  consistency_check:
+    enabled: true
+    threshold: 65                  # 低于65分不允许进入 ready，强化图文相关性
+    check_fields:
+      - "idol_name"
+      - "group_name"
+      - "source_note"
+      - "caption"
+      - "image_description"
+      - "usage_scene"
+    rules:
+      - "文章人物和图片人物必须一致"
+      - "文章组合和图片组合必须一致"
+      - "如果文章写机场，图片不能是舞台图"
+      - "如果文章写品牌活动，图片不能是生活照"
+      - "如果图片没有描述，文章不要写具体画面细节"
+
+  # 自动元素
+  auto_elements:
+    reading_time: false             # 爱豆文不需要阅读时间
+    author_info: false
+    share_buttons: false
+    copyright_notice: false
+    cta_footer: false              # 不硬性互动 CTA
+
+# ---- 模板系统 ----
+template_system:
+  # 模板存储路径
+  storage_path: "config/templates/templates.json"
+  # 默认启用的模板（null=使用系统默认排版）
+  default_template: null
+  # 模板优先级
+  priority:
+    - "article_specified"          # 文章指定模板
+    - "default_enabled"            # 默认启用模板
+    - "system_default"             # 系统默认排版标准
+
+  # 占位符定义
+  placeholders:
+    - "{{TITLE}}"
+    - "{{SUMMARY}}"
+    - "{{INTRO}}"
+    - "{{BODY_PARAGRAPHS}}"
+    - "{{IMAGE_1}}"
+    - "{{IMAGE_2}}"
+    - "{{IMAGE_3}}"
+    - "{{IMAGE_4}}"
+    - "{{CAPTION_1}}"
+    - "{{CAPTION_2}}"
+    - "{{CAPTION_3}}"
+    - "{{CAPTION_4}}"
+    - "{{ENDING}}"
+
+  # 图片来源风险过滤
+  image_risk_filter:
+    # 这些类型的图片不能作为爱豆正文图
+    excluded_types:
+      - "advertisement"
+      - "googleads"
+      - "adserver"
+      - "ads"
+      - "popup"
+      - "campaign"
+      - "affiliate"
+      - "tracking"
+      - "googlesyndication"
+      - "doubleclick"
+      - "taboola"
+      - "outbrain"
+      - "recommend"
+      - "related"
+      - "newsletter"
+      - "subscribe"
+      - "profile"
+      - "avatar"
+      - "widget"
+      - "promotion"
+      - "promo"
+      - "sponsored"
+      - "recruitment"
+      - "banner"
+      - "header"
+      - "logo"
+      - "event_entrance"
+      - "navigation"
+      - "icon"
+      - "button"
+    # URL模式过滤（包含这些关键词的图片URL直接排除）
+    excluded_url_patterns:
+      - "logo"
+      - "banner"
+      - "header"
+      - "footer"
+      - "ad."
+      - "advertis"
+      - "sponsor"
+      - "recruit"
+      - "icon"
+      - "button"
+      - "nav_"
+      - "sidebar"
+    # 如果没有真实爱豆人物图，不进入 ready
+    require_real_person_photo: true
+
+# ---- 反馈 & 复盘 ----
+feedback_agent:
+  analytics_fetch_interval_hours: 24
+  review_schedule:
+    daily_summary: "22:00"
+    weekly_review: "周日 20:00"
+    monthly_report: "每月最后一天"
+  thresholds:
+    read_count_min: 500
+    like_rate_min: 0.03
+    share_rate_min: 0.01
+  feedback_loop:
+    enabled: true
+    lookback_days: 30
+    weight_decay: 0.95

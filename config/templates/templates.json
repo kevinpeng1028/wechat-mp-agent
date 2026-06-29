@@ -1,0 +1,32 @@
+{
+  "wechat_published_template": {
+    "name": "wechat_published_template",
+    "source": "公众号已发布/草稿文章",
+    "html": "",
+    "font_size": "16px",
+    "line_height": "1.9",
+    "letter_spacing": "0.5px",
+    "paragraph_spacing": "18px",
+    "image_style": "default",
+    "enabled": false,
+    "created_at": ""
+  },
+  "wechat_banner_template": {
+    "name": "wechat_banner_template",
+    "source": "公众号草稿箱文章（含Banner+双底部图片）",
+    "html": "<section style=\"text-align: center;\" nodeleaf=\"\"><img data-src=\"https://mmbiz.qpic.cn/mmbiz_jpg/17bia319bpNPA9cSuvY8QC8iapicHE8kHIlFwffSf0VV7wueSPPXP5EAfFvxM6bmJMicpfj59mCnkiaibTa09O376iaJJmWvOYoKV9KKpB1h2A8cjM/640?wx_fmt=jpeg\" class=\"rich_pages wxw-img js_insertlocalimg\" data-ratio=\"0.2766143106457243\" data-s=\"300,640\" data-type=\"png\" data-w=\"1146\" style=\"width:567px;height:157px;\" type=\"block\" data-croporisrc=\"https://mmbiz.qpic.cn/mmbiz_png/17bia319bpNPZm268bUrCeEx78fkVbqg88CLWetNv6dY7QVBDzz3lXQRD1nZPTmQAjQB2yficCSPXA1wfqRLI5B0ibuTtQnlmjLcKYZfLoVpnk/0?wx_fmt=png&amp;from=appmsg\" data-cropx1=\"201.96539792387543\" data-cropx2=\"1347.3217993079584\" data-cropy1=\"688.2768166089966\" data-cropy2=\"1004.5121107266438\" data-imgfileid=\"100000823\" data-imgqrcoded=\"1\" data-aistatus=\"1\"></section>\n<section style=\"margin:0;padding:0;\">\n{{INTRO}}\n{{BODY_PARAGRAPHS}}\n{{ENDING}}\n</section>\n<section style=\"text-align: center;\"><img data-src=\"https://mmbiz.qpic.cn/sz_mmbiz_jpg/17bia319bpNOzW4SicJNlzXibO6FvXTOqicZ1rGvCp86OuBOynoLwIE46dLCXzY30YX4oRKZ575oZuicCnu36x6Dmxic0JW320EChOYdrxxZHnIXE/640?wx_fmt=jpeg\" class=\"rich_pages wxw-img\" data-ratio=\"1.503125\" data-s=\"300,640\" data-type=\"jpeg\" data-w=\"1280\" style=\"width:360px;height:541px;\" /></section>\n<p style=\"text-align: center;margin-bottom: 8px;\"><span style=\"font-size: 14px;font-weight: bold;\">👇刚更新的韩娱热点在这里</span></p>\n<p style=\"text-align: center;margin-bottom: 8px;\"><span style=\"font-size: 14px;font-weight: bold;\">点个关注，下一条瓜不迷路</span></p>\n<section style=\"text-align: center;\"><img data-src=\"https://mmbiz.qpic.cn/mmbiz_jpg/17bia319bpNMOu3hKnlsR8SL72I33LF5w67l0lYWhic4Nibr1XwaYrRF4kSON6WX5O7XcG7GA3hTUXcc3CdTEEBefs0m4ibHRzFoo1p17k4IFy0/640?wx_fmt=jpeg\" class=\"rich_pages wxw-img\" data-ratio=\"0.31171875\" data-s=\"300,640\" data-type=\"png\" data-w=\"1280\" style=\"width:578px;height:180px;\" /></section>\n<p style=\"text-align: center;margin-bottom: 8px;\"><span style=\"font-size: 14px;font-weight: bold;\">如果你也在吃瓜</span></p>\n<p style=\"text-align: center;margin-bottom: 8px;\"><span style=\"font-size: 14px;font-weight: bold;\">点个「推荐」告诉我</span></p>",
+    "font_size": "16px",
+    "line_height": "1.9",
+    "letter_spacing": "0.5px",
+    "paragraph_spacing": "18px",
+    "image_style": "default",
+    "enabled": true,
+    "created_at": "",
+    "banner_img_url": "https://mmbiz.qpic.cn/mmbiz_jpg/17bia319bpNPA9cSuvY8QC8iapicHE8kHIlFwffSf0VV7wueSPPXP5EAfFvxM6bmJMicpfj59mCnkiaibTa09O376iaJJmWvOYoKV9KKpB1h2A8cjM/640?wx_fmt=jpeg",
+    "footer_img_url_1": "https://mmbiz.qpic.cn/sz_mmbiz_jpg/17bia319bpNOzW4SicJNlzXibO6FvXTOqicZ1rGvCp86OuBOynoLwIE46dLCXzY30YX4oRKZ575oZuicCnu36x6Dmxic0JW320EChOYdrxxZHnIXE/640?wx_fmt=jpeg",
+    "footer_img_url_2": "https://mmbiz.qpic.cn/mmbiz_jpg/17bia319bpNMOu3hKnlsR8SL72I33LF5w67l0lYWhic4Nibr1XwaYrRF4kSON6WX5O7XcG7GA3hTUXcc3CdTEEBefs0m4ibHRzFoo1p17k4IFy0/640?wx_fmt=jpeg",
+    "footer_img_url": "https://mmbiz.qpic.cn/mmbiz_jpg/17bia319bpNMOu3hKnlsR8SL72I33LF5w67l0lYWhic4Nibr1XwaYrRF4kSON6WX5O7XcG7GA3hTUXcc3CdTEEBefs0m4ibHRzFoo1p17k4IFy0/640?wx_fmt=jpeg",
+    "has_banner": true,
+    "has_footer": true
+  }
+}

@@ -1,0 +1,37 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# logs
+logs/
+*.log
+
+# runtime data
+data/images/
+data/articles/
+data/analytics/
+data/topics/
+data/*.db
+*.sqlite
+*.sqlite3
+
+# backups
+*.backup*
+*.bak
+*.tmp
+*.zip
+
+# system
+.DS_Store
+.idea/
+.vscode/

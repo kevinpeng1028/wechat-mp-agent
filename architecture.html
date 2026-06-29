@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微信公众号全自动运营 Agent 架构图</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { 
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: #f0f2f5; color: #333; padding: 40px 20px;
+    display: flex; justify-content: center;
+  }
+  .container { max-width: 900px; width: 100%; }
+  h1 { text-align: center; font-size: 24px; margin-bottom: 8px; color: #1a1a1a; }
+  .subtitle { text-align: center; color: #888; font-size: 14px; margin-bottom: 40px; }
+
+  /* 流程图容器 */
+  .flowchart { position: relative; }
+  
+  /* 节点通用样式 */
+  .node {
+    border-radius: 12px; padding: 18px 24px; text-align: center;
+    font-weight: 600; font-size: 14px; transition: all 0.3s;
+    cursor: default; position: relative;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+  .node:hover {
+    transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+  }
+  .node .desc { font-size: 11px; font-weight: 400; color: #666; margin-top: 4px; opacity: 0.85; }
+
+  /* 各节点颜色 */
+  .trigger-node   { background: linear-gradient(135deg, #e3f2fd, #bbdefb); border: 2px solid #90caf9; color: #1565c0; }
+  .topic-node     { background: linear-gradient(135deg, #e8eaf6, #c5cae9); border: 2px solid #9fa8da; color: #283593; }
+  .writer-node    { background: linear-gradient(135deg, #e8f5e9, #c8e6c9); border: 2px solid #a5d6a7; color: #2e7d32; }
+  .image-node     { background: linear-gradient(135deg, #fff3e0, #ffe0b2); border: 2px solid #ffcc80; color: #ef6c00; }
+  .format-node    { background: linear-gradient(135deg, #fce4ec, #f8bbd0); border: 2px solid #f48fb1; color: #c2185b; }
+  .publish-node   { background: linear-gradient(135deg, #e0f7fa, #b2ebf2); border: 2px solid #80deea; color: #00838f; }
+  .feedback-node  { background: linear-gradient(135deg, #fafafa, #eeeeee); border: 2px solid #bdbdbd; color: #424242; }
+
+  /* 连接线 */
+  .connector {
+    display: flex; align-items: center; justify-content: center; height: 36px;
+    position: relative;
+  }
+  .arrow-down {
+    width: 2px; height: 100%; background: #ccc; position: absolute;
+  }
+  .arrow-head {
+    width: 0; height: 0; border-left: 6px solid transparent;
+    border-right: 6px solid transparent; border-top: 10px solid #ccc;
+    position: absolute; bottom: -2px;
+  }
+
+  /* 分支布局 */
+  .branch-row {
+    display: flex; gap: 20px; justify-content: center; margin: 8px 0;
+  }
+  .branch-item { flex: 1; max-width: 320px; }
+
+  /* 反馈回路 */
+  .feedback-loop {
+    position: absolute; left: -30px; top: 50%;
+    border: 2px dashed #aaa; border-radius: 8px; padding: 8px;
+    font-size: 11px; color: #999; writing-mode: vertical-rl;
+    text-orientation: mixed; transform: translateY(-50%);
+  }
+
+  /* 图例 */
+  .legend { 
+    display: flex; flex-wrap: wrap; gap: 12px; justify-content: center;
+    margin-top: 32px; padding: 16px; background: white; border-radius: 10px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #555; }
+  .dot { width: 14px; height: 14px; border-radius: 4px; flex-shrink: 0; }
+
+  /* 技术栈标签 */
+  .tech-stack {
+    margin-top: 28px; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+  }
+  .tech-card {
+    background: white; border-radius: 8px; padding: 16px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .tech-card h4 { font-size: 13px; color: #444; margin-bottom: 8px; }
+  .tech-card p { font-size: 11px; color: #777; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🤖 微信公众号全自动运营 Agent 架构</h1>
+  <p class="subtitle">WeChat-MP-Agent v1.0 — 从选题到发布到复盘的全链路自动化</p>
+
+  <div class="flowchart">
+
+    <!-- 触发层 -->
+    <div class="node trigger-node" style="max-width: 600px; margin: 0 auto;">
+      ⏰ 触发层 (Trigger Layer)
+      <div class="desc">定时任务 / 手动触发 / 热点事件触发</div>
+    </div>
+
+    <div class="connector"><div class="arrow-down"></div><div class="arrow-head"></div></div>
+
+    <!-- 选题 -->
+    <div class="node topic-node" style="max-width: 600px; margin: 0 auto;">
+      ① 选题 Agent
+      <div class="desc">RSS热点跟踪 / 关键词规划 / GPT选题打分</div>
+    </div>
+
+    <div class="connector"><div class="arrow-down"></div><div class="arrow-head"></div></div>
+
+    <!-- 写作 -->
+    <div class="node writer-node" style="max-width: 600px; margin: 0 auto;">
+      ② 写作 Agent
+      <div class="desc">Tavily 搜索源文章 → LLM 基于源文改写 / SEO标题 / 摘要</div>
+    </div>
+
+    <div class="connector"><div class="arrow-down"></div><div class="arrow-head"></div></div>
+
+    <!-- 配图 -->
+    <div class="node image-node" style="max-width: 600px; margin: 0 auto;">
+      ③ 配图 Agent
+      <div class="desc">下载 Tavily 源文章配图（图文绑定，确保相关性）</div>
+    </div>
+
+    <div class="connector"><div class="arrow-down"></div><div class="arrow-head"></div></div>
+
+    <!-- 排版 -->
+    <div class="node format-node" style="max-width: 600px; margin: 0 auto;">
+      ④ 排版 Agent
+      <div class="desc">Markdown→HTML · 自动排版+样式注入 · 图片插入</div>
+    </div>
+
+    <div class="connector"><div class="arrow-down"></div><div class="arrow-head"></div></div>
+
+    <!-- 发布 -->
+    <div class="node publish-node" style="max-width: 600px; margin: 0 auto;">
+      ⑤ 发布 Agent
+      <div class="desc">素材上传 / 草稿箱创建 / 定时发送或人工审核后发布</div>
+    </div>
+
+    <div class="connector"><div class="arrow-down"></div><div class="arrow-head"></div></div>
+
+    <!-- 反馈复盘 -->
+    <div class="node feedback-node" style="max-width: 600px; margin: 0 auto;">
+      ⑥ 反馈 & 复盘
+      <div class="desc">阅读数/点赞/收藏数据分析 → 反馈到选题评分模型</div>
+    </div>
+
+    <!-- 反馈回路标注 -->
+    <svg style="position:absolute;left:-45px;top:280px;width:35px;height:220px;" viewBox="0 0 35 220">
+      <path d="M17 210 Q-15 150 -5 90 Q5 50 17 25" fill="none" stroke="#bbb" stroke-width="1.5" stroke-dasharray="5,4"/>
+      <polygon points="17,22 13,33 21,33" fill="#bbb"/>
+      <text x="-28" y="120" font-size="11" fill="#999" transform="rotate(-90,-28,120)" text-anchor="middle">反馈回路</text>
+    </svg>
+  </div>
+
+  <!-- 图例 -->
+  <div class="legend">
+    <div class="legend-item"><div class="dot" style="background:#90caf9;"></div>触发层</div>
+    <div class="legend-item"><div class="dot" style="background:#9fa8da;"></div>① 选题</div>
+    <div class="legend-item"><div class="dot" style="background:#a5d6a7;"></div>② 写作</div>
+    <div class="legend-item"><div class="dot" style="background:#ffcc80;"></div>③ 配图</div>
+    <div class="legend-item"><div class="dot" style="background:#f48fb1;"></div>④ 排版</div>
+    <div class="legend-item"><div class="dot" style="background:#80deea;"></div>⑤ 发布</div>
+    <div class="legend-item"><div class="dot" style="background:#bdbdbd;"></div>⑥ 复盘</div>
+  </div>
+
+  <!-- 技术栈 -->
+  <div class="tech-stack">
+    <div class="tech-card">
+      <h4>🧠 LLM 层</h4>
+      <p>GPT-4o (写作) · gpt-4o-mini (摘要/SEO) · 支持自定义 API 接入</p>
+    </div>
+    <div class="tech-card">
+      <h4>📡 数据源</h4>
+      <p>RSS 订阅源 · Tavily 搜索 API (素材搜集+源文章配图) · 微信 MP API</p>
+    </div>
+    <div class="tech-card">
+      <h4>⏱️ 调度系统</h4>
+      <p>APScheduler (cron) · 热点事件检测 · 手动触发 · 定时发布</p>
+    </div>
+    <div class="tech-card">
+      <h4>🎨 排版引擎</h4>
+      <p>Markdown → HTML · 多主题CSS模板 · 公众号兼容格式 · 自动元素注入</p>
+    </div>
+    <div class="tech-card">
+      <h4>📊 分析复盘</h4>
+      <p>阅读量/互动数据采集 · 指标阈值告警 · 日/周/月报告 · 评分权重动态调整</p>
+    </div>
+    <div class="tech-card">
+      <h4>🛠️ 工程基础</h4>
+      <p>Python 3.11+ · async/await · Pydantic配置 · Rich CLI · Loguru日志 · YAML配置</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>
