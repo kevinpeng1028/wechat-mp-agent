@@ -140,48 +140,40 @@ class WeChatMPOrchestrator:
             if manual_mode:
                 await self._confirm_step("写作（爱豆状态观察文风）")
 
-            writer_result = await self.writer.run(ctx)
-            report["steps"].append(self._result_to_dict(writer_result))
-
-            if not writer_result.is_success:
-                console.print(f"[red]❌ 写作失败: {self._short_error(writer_result.error)}[/red]")
-                report["final_status"] = "failed_at_writer"
-                return self._finalize_report(report)
-
-            ctx.update(writer_result.output or {})
-            progress.update(task2, completed=True)
-
-            written = writer_result.output.get("written_articles", []) if writer_result.output else []
-            console.print(
-                f"  ✅ 写作完成: {len(written)} 篇文章 | "
-                f"字数: {written[0].get('word_count', '?') if written else '?'} | "
-                f"图文一致性: {written[0].get('consistency_score', '?') if written else '?'}分"
-            )
-
             # ---- Step 3: 配图（下载Tavily源文章配图）----
             task3 = progress.add_task("[bold magenta]③ 配图 Agent[/bold magenta]", total=None)
 
             if manual_mode:
                 await self._confirm_step("配图（下载Tavily源文章配图）")
 
-            # 配图Agent需要 tavily_images
-            # 从写作结果中获取
-            all_images = writer_result.output.get("tavily_images", []) if writer_result.output else []
-            ctx["tavily_images"] = all_images
+            fallback_topics = ctx.get("ready_articles") or selected
+            max_attempts = self.config.get(
+                "topic_agent.image.max_article_image_attempts", 5
+            )
+            written, images, fallback_results = await self._write_with_image_fallback(
+                ctx,
+                fallback_topics,
+                max_attempts=max_attempts,
+                target_count=self.config.get("topic_agent.search.selected_count", 2),
+            )
+            for result in fallback_results:
+                report["steps"].append(self._result_to_dict(result))
 
-            image_result = await self.image_agent.run(ctx)
-            report["steps"].append(self._result_to_dict(image_result))
+            if not written:
+                report["final_status"] = "failed_at_image"
+                raise RuntimeError(
+                    f"前 {min(len(fallback_topics), max_attempts)} 篇候选图片均失败，"
+                    "终止流程，不进入排版/草稿"
+                )
 
-            # 配图失败必须阻塞：图片不过关不进入排版/草稿
-            if image_result.is_success:
-                images = image_result.output.get("images", []) if image_result.output else []
-                ctx["downloaded_images"] = images
-                progress.update(task3, completed=True)
-                console.print(f"  ✅ 配图完成: 下载 {len(images)} 张图片")
-            else:
-                logger.error(f"[编排器] 配图失败，终止流程，不进入排版/草稿: {image_result.error}")
-                raise RuntimeError(f"配图失败，终止流程，不进入排版/草稿: {image_result.error}")
-                progress.update(task3, completed=True)
+            ctx["written_articles"] = written
+            ctx["downloaded_images"] = images
+            ctx["selected_topics"] = [a.get("topic_info", {}) for a in written]
+            progress.update(task2, completed=True)
+            progress.update(task3, completed=True)
+            console.print(
+                f"  ✅ 写作/配图完成: {len(written)} 篇文章，下载 {len(images)} 张图片"
+            )
 
             # ---- Step 4: 排版 ----
             task4 = progress.add_task("[bold yellow]④ 排版 Agent[/bold yellow]", total=None)
@@ -292,6 +284,68 @@ class WeChatMPOrchestrator:
                 "position": article.get("position", "unknown"),
             })
         return formatted
+
+    async def _write_with_image_fallback(
+        self,
+        ctx: Dict,
+        candidates: List[Dict],
+        max_attempts: int = 5,
+        target_count: int = 2,
+    ):
+        """逐篇写作并验证图片；失败时切换下一候选。"""
+        successful_articles = []
+        successful_images = []
+        results = []
+        attempted = candidates[:max_attempts]
+
+        for index, topic in enumerate(attempted, start=1):
+            title = topic.get("title", "?")
+            logger.info(
+                f"[编排器] 图片候选尝试 {index}/{len(attempted)}: {title[:80]}"
+            )
+            single_ctx = dict(ctx)
+            single_ctx["selected_topics"] = [topic]
+            writer_result = await self.writer.run(single_ctx)
+            results.append(writer_result)
+            if not writer_result.is_success:
+                logger.warning(f"[编排器] 写作失败，切换下一篇: {title[:80]}")
+                continue
+
+            article = (writer_result.output or {}).get("written_articles", [None])[0]
+            if not article:
+                continue
+            image_ctx = dict(ctx)
+            image_ctx["tavily_images"] = article.get("tavily_images", [])
+            image_ctx["topic_info"] = article.get("topic_info", topic)
+            image_result = await self.image_agent.run(image_ctx)
+            results.append(image_result)
+            images = (image_result.output or {}).get("images", [])
+
+            if not image_result.is_success or not images:
+                topic["image_failed"] = True
+                topic["image_failure_reason"] = (
+                    image_result.error
+                    or (image_result.output or {}).get("message")
+                    or "没有有效图片"
+                )
+                logger.warning(
+                    f"[编排器] 图片失败: {title[:80]} | "
+                    f"{topic['image_failure_reason']} | 切换下一篇"
+                )
+                continue
+
+            position = "headline" if not successful_articles else "sub_headline"
+            article["position"] = position
+            article["topic_info"]["position"] = position
+            successful_articles.append(article)
+            successful_images.extend(images)
+            logger.info(
+                f"[编排器] ✅ 图文通过: {title[:80]} | 图片 {len(images)} 张"
+            )
+            if len(successful_articles) >= target_count:
+                break
+
+        return successful_articles, successful_images, results
 
     # ==================== 辅助方法 ====================
 

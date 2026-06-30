@@ -81,6 +81,18 @@ topic_agent:
       site: "sbsstar.net"
       lang: "en"
       query_suffix: "BTS BLACKPINK NewJeans IVE aespa Stray Kids SEVENTEEN TXT ENHYPEN idol member fashion airport fans react viral dating rumor controversy brand event"
+    - name: "KpopStarz"
+      site: "kpopstarz.com"
+      lang: "en"
+      query_suffix: "BTS BLACKPINK aespa IVE fashion airport viral"
+    - name: "NME K-pop"
+      site: "nme.com"
+      lang: "en"
+      query_suffix: "k-pop BTS BLACKPINK aespa IVE latest"
+    - name: "Billboard K-pop"
+      site: "billboard.com"
+      lang: "en"
+      query_suffix: "k-pop BTS BLACKPINK Stray Kids NewJeans chart"
     # Korea JoongAng Daily 暂停启用：综合新闻源会混入社会、商业和生活内容。
 
   # 通用搜索关键词 — 已禁用（无站点限制，返回内容不精准）
@@ -113,11 +125,23 @@ topic_agent:
 
   # 搜索参数
   search:
-    candidate_count: 10          # 严格过滤后扩大候选池，避免只剩重复文章
+    candidate_count: 20          # 分层搜索后保留更大的候选池供图片 fallback
     selected_count: 2           # 仍然选择头条+次条
     freshness_hours: 24         # 只选24小时内的素材
+    freshness_hours_primary: 24
+    freshness_hours_secondary: 72
+    max_tavily_queries: 10       # 单次运行总预算，默认不超过10次
+    max_extra_tavily_queries: 4
+    min_candidates_before_extra_search: 3
+    use_search_cache: true
     min_images_per_article: 1   # 每篇文章至少需要1张图
     max_images_per_article: 4   # 每篇文章最多4张图，必须强相关
+
+  image:
+    max_article_image_attempts: 5
+    max_image_search_queries: 3
+    require_valid_image: true
+    min_images_required: 1
 
   # 综合评分权重（15个评分字段）
   scoring:

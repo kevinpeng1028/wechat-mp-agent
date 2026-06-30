@@ -17,7 +17,8 @@ from src.logger import logger
 BLOCKED_KEYWORDS = [
     "audition", "apply", "recruit", "trainee", "casting",
     "banner", "logo", "advertisement", "sponsor", "sponsored", "promo", "promotion", "widget", "icon", "avatar", "profile", "subscribe", "newsletter", "related", "recommend", "outbrain", "taboola", "doubleclick", "googlesyndication", "tracking", "affiliate", "campaign", "popup", "ads", "adserver", "googleads",
-    "button", "icon", "favicon",
+    "button", "icon", "favicon", "xwhite30.png", "placeholder",
+    "sprite", "blank",
 ]
 
 
@@ -158,7 +159,21 @@ class ImageAgent(BaseAgent):
     async def execute(self, context: Dict) -> AgentResult:
         """执行配图流程"""
         # 从 context 中获取 Tavily 源文章配图
-        tavily_images = context.get("tavily_images", [])
+        tavily_images = list(context.get("tavily_images", []))
+        topic_info = context.get("topic_info", {})
+        article_url = topic_info.get("url", "") if isinstance(topic_info, dict) else ""
+        if article_url:
+            og_image = await self._fetch_og_image(article_url)
+            if og_image and not any(
+                (img.get("url") if isinstance(img, dict) else img) == og_image
+                for img in tavily_images
+            ):
+                tavily_images.insert(0, {
+                    "url": og_image,
+                    "source": article_url,
+                    "description": "article og:image",
+                })
+                logger.info(f"[配图Agent] 优先加入文章 og:image: {og_image[:80]}")
 
         if not tavily_images:
             logger.warning("[配图Agent] 写作Agent未传递 tavily_images，无图可用")
@@ -298,7 +313,7 @@ class ImageAgent(BaseAgent):
             return None
 
         try:
-            response = await http.get(url)
+            response = await http.get(url, headers=self._headers_for_url(url))
             response.raise_for_status()
 
             # 跳过 SVG（通过 content-type 二次检查）
@@ -374,7 +389,47 @@ class ImageAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"[配图Agent] 下载失败 {url[:80]}: {e}")
-            raise
+            return None
+
+    @staticmethod
+    def _headers_for_url(url: str) -> Dict[str, str]:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            )
+        }
+        host = urlparse(url).netloc.lower()
+        if "allkpop.com" in host:
+            headers["Referer"] = "https://www.allkpop.com/"
+        elif "koreaboo.com" in host:
+            headers["Referer"] = "https://www.koreaboo.com/"
+        elif "soompi.com" in host or "soompi.io" in host:
+            headers["Referer"] = "https://www.soompi.com/"
+        return headers
+
+    async def _fetch_og_image(self, article_url: str) -> Optional[str]:
+        """读取文章 og:image，失败时静默回退到 Tavily 图片。"""
+        try:
+            http = await self._get_http()
+            response = await http.get(
+                article_url,
+                headers=self._headers_for_url(article_url),
+            )
+            response.raise_for_status()
+            html = response.text[:500_000]
+            patterns = [
+                r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::secure_url)?["\']',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, html, flags=re.IGNORECASE)
+                if match and not _is_blocked_image(match.group(1)):
+                    return match.group(1)
+        except Exception as exc:
+            logger.info(f"[配图Agent] og:image 获取失败，使用 Tavily 图片: {exc}")
+        return None
 
     def _categorize_images(self, downloaded: List[Dict]) -> Dict[str, List[Dict]]:
         """

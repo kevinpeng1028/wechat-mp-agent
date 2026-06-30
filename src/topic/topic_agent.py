@@ -143,14 +143,27 @@ class TopicAgent(BaseAgent):
         self.llm_client = self._init_llm()
         self.http_client = None
         self.scoring = ScoringSystem(config or {})
-        search_cfg = (config or {}).get("topic_agent.search", {})
+        search_cfg = self.get_config("topic_agent.search", {})
         self.candidate_count = search_cfg.get("candidate_count", 5)
         self.selected_count = search_cfg.get("selected_count", 2)
         self.freshness_hours = search_cfg.get("freshness_hours", 24)
         self.min_images = search_cfg.get("min_images_per_article", 1)
-        # 搜索结果缓存：同日内相同 query 不重复调用 Tavily
+        self.max_tavily_queries = search_cfg.get("max_tavily_queries", 10)
+        self.max_extra_tavily_queries = search_cfg.get("max_extra_tavily_queries", 4)
+        self.use_search_cache = search_cfg.get("use_search_cache", True)
+        self.min_candidates_before_extra = search_cfg.get(
+            "min_candidates_before_extra_search", 3
+        )
+        self._actual_tavily_calls = 0
+        self._cache_hits = 0
+        # 进程内缓存 + 同日磁盘缓存
         self._search_cache: Dict[str, Tuple[float, List[Dict]]] = {}
-        self._cache_ttl: int = 3600  # 缓存有效期 1 小时
+        project_root = Path((config or {}).get("project_root", "."))
+        self._daily_cache_path = (
+            project_root / "data" / "topics"
+            / f"search_cache_{datetime.now().strftime('%Y-%m-%d')}.json"
+        )
+        self._load_daily_search_cache()
 
     def _init_llm(self):
         from openai import AsyncOpenAI
@@ -311,6 +324,7 @@ class TopicAgent(BaseAgent):
                 "scored_count": len(scored),
                 "ready_count": len(ready_articles),
                 "selected_topics": selected,
+                "ready_articles": ready_articles,
                 "all_scored": scored_sorted[:10],  # 保留前10名供参考
                 "trigger_type": context.get("trigger_type", "manual"),
             },
@@ -332,33 +346,124 @@ class TopicAgent(BaseAgent):
             logger.error("[选题Agent] Tavily API Key 未配置！")
             return []
 
-        search_sources = self.get_config("topic_agent.search_sources", [])
-        general_keywords = self.get_config("topic_agent.general_keywords", [])
-
         all_results = []
         seen_urls = set()
+        tiers = self._build_tiered_search_queries()
 
-        # 构建搜索查询列表
-        search_queries = self._build_search_queries(search_sources, general_keywords)
+        async def run_queries(queries: List[Dict]):
+            remaining = max(0, self.max_tavily_queries - self._actual_tavily_calls)
+            for i in range(0, min(len(queries), remaining), 3):
+                batch = queries[i:i + min(3, remaining - i)]
+                results = await asyncio.gather(
+                    *(self._tavily_search(query) for query in batch)
+                )
+                for query_result in results:
+                    for article in query_result or []:
+                        url = article.get("url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            all_results.append(article)
 
-        # 并行执行搜索（每次最多3个查询，避免API超限）
-        batch_size = 3
-        for i in range(0, len(search_queries), batch_size):
-            batch = search_queries[i:i + batch_size]
-            tasks = [self._tavily_search(q) for q in batch]
-            results = await asyncio.gather(*tasks)
+        await run_queries(tiers["primary"])
+        eligible = len(self._filter_idol_centric_topics(all_results))
+        if eligible < self.min_candidates_before_extra:
+            await run_queries(tiers["secondary"][:self.max_extra_tavily_queries])
+            eligible = len(self._filter_idol_centric_topics(all_results))
+        if eligible < 2:
+            await run_queries(tiers["supplemental"][:self.max_extra_tavily_queries])
 
-            for query_result in results:
-                if not query_result:
-                    continue
-                for article in query_result:
-                    url = article.get("url", "")
-                    if url and url not in seen_urls:
-                        seen_urls.add(url)
-                        all_results.append(article)
-
-        logger.info(f"[选题Agent] Tavily搜索完成: {len(all_results)} 篇独特文章")
+        logger.info(
+            f"[选题Agent] Tavily搜索完成: {len(all_results)} 篇独特文章 | "
+            f"实际调用 {self._actual_tavily_calls}/{self.max_tavily_queries} | "
+            f"缓存命中 {self._cache_hits} | "
+            f"剩余预算 {max(0, self.max_tavily_queries-self._actual_tavily_calls)}"
+        )
         return all_results
+
+    def _build_tiered_search_queries(self) -> Dict[str, List[Dict]]:
+        primary = [
+            ("soompi.com", "Soompi", "Stray Kids SEVENTEEN TXT ENHYPEN concert album"),
+            ("allkpop.com", "AllKpop", "IVE LE SSERAFIM BABYMONSTER i-dle MV teaser comeback"),
+            ("koreaboo.com", "Koreaboo", "BTS BLACKPINK NewJeans aespa fans react goes viral"),
+            ("sbsstar.net", "SBS Star", "TWICE ITZY NMIXX Red Velvet latest controversy"),
+            ("kpopstarz.com", "KpopStarz", "BTS V Suga Jennie Lisa Karina Wonyoung fashion week airport"),
+            ("nme.com", "NME K-pop", "k-pop BTS BLACKPINK aespa IVE latest"),
+            ("billboard.com", "Billboard K-pop", "k-pop BTS BLACKPINK Stray Kids NewJeans chart"),
+        ]
+        secondary = [
+            ("entertain.naver.com", "Naver Entertainment", "BTS BLACKPINK aespa IVE"),
+            ("osen.co.kr", "OSEN", "BTS aespa IVE BLACKPINK"),
+            ("starnewskorea.com", "StarNews", "BTS BLACKPINK NewJeans aespa"),
+            ("newsen.com", "NewsEn", "BTS BLACKPINK aespa IVE"),
+            ("xportsnews.com", "XportsNews", "BTS BLACKPINK aespa IVE"),
+            ("mydaily.co.kr", "MyDaily", "BTS BLACKPINK aespa IVE"),
+            ("dispatch.co.kr", "Dispatch", "BTS BLACKPINK aespa IVE"),
+            ("tenasia.com", "TenAsia", "BTS BLACKPINK aespa IVE"),
+            ("sports.chosun.com", "Sports Chosun", "BTS BLACKPINK aespa IVE"),
+            ("tvreport.co.kr", "TVReport", "BTS BLACKPINK aespa IVE"),
+        ]
+        supplemental = [
+            ("", "supplemental", "BTS BLACKPINK aespa IVE fans react goes viral airport fashion week brand event"),
+            ("", "supplemental", "BTS BLACKPINK Stray Kids dating rumor controversy"),
+            ("", "supplemental", "HYBE responds SM responds JYP responds YG responds protects artists legal action"),
+        ]
+        primary_hours = self.get_config(
+            "topic_agent.search.freshness_hours_primary", 24
+        )
+        secondary_hours = self.get_config(
+            "topic_agent.search.freshness_hours_secondary", 72
+        )
+        def pack(rows, freshness_hours):
+            return [{
+                "query": (f"site:{site} " if site else "") + suffix,
+                "site": site,
+                "source_name": name,
+                "freshness_hours": freshness_hours,
+            } for site, name, suffix in rows]
+        return {
+            "primary": pack(primary, primary_hours),
+            "secondary": pack(secondary, secondary_hours),
+            "supplemental": pack(supplemental, secondary_hours),
+        }
+
+    def _load_daily_search_cache(self):
+        if not self.use_search_cache or not self._daily_cache_path.exists():
+            return
+        try:
+            data = json.loads(self._daily_cache_path.read_text(encoding="utf-8"))
+            for key, entry in data.items():
+                results = entry.get("results", [])
+                for article in results:
+                    article["published_date"] = self._parse_date(
+                        article.get("published_date_str", "")
+                    )
+                self._search_cache[key] = (entry.get("created_ts", 0), results)
+        except Exception as exc:
+            logger.warning(f"[选题Agent] 搜索缓存读取失败，忽略: {exc}")
+
+    def _save_daily_search_cache(self):
+        if not self.use_search_cache:
+            return
+        try:
+            self._daily_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {}
+            for key, (created_ts, results) in self._search_cache.items():
+                serializable = []
+                for article in results:
+                    item = dict(article)
+                    item.pop("published_date", None)
+                    serializable.append(item)
+                payload[key] = {
+                    "created_ts": created_ts,
+                    "created_at": datetime.fromtimestamp(created_ts).isoformat(),
+                    "results": serializable,
+                }
+            self._daily_cache_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning(f"[选题Agent] 搜索缓存写入失败，忽略: {exc}")
 
     def _build_search_queries(
         self, search_sources: List[Dict], general_keywords: List[str]
@@ -394,22 +499,27 @@ class TopicAgent(BaseAgent):
         return queries
 
     async def _tavily_search(self, query_info: Dict) -> List[Dict]:
-        """执行单次 Tavily 搜索（含缓存，同 query 1小时内不重复调用）"""
+        """执行单次 Tavily 搜索（同一天同 query 优先命中缓存）。"""
         import time
 
         query = query_info["query"]
         source_name = query_info.get("source_name", "unknown")
-        cache_key = f"{query}|{self.get_config('tavily.time_range', 'day')}"
+        freshness_hours = query_info.get("freshness_hours", self.freshness_hours)
+        time_range = "day" if freshness_hours <= 24 else "week"
+        cache_key = f"{query}|{time_range}"
 
-        # 检查缓存
-        now_ts = time.time()
-        if cache_key in self._search_cache:
-            cached_ts, cached_result = self._search_cache[cache_key]
-            if now_ts - cached_ts < self._cache_ttl:
-                logger.info(
-                    f"[选题Agent] 🗄️ 缓存命中 | {source_name} | query='{query[:50]}' → {len(cached_result)} 篇（缓存年龄 {int((now_ts - cached_ts)/60)} 分钟）"
-                )
-                return cached_result
+        if self.use_search_cache and cache_key in self._search_cache:
+            self._cache_hits += 1
+            cached_result = self._search_cache[cache_key][1]
+            logger.info(
+                f"[选题Agent] 🗄️ 命中当日缓存 | {source_name} | "
+                f"query='{query[:50]}' → {len(cached_result)} 篇"
+            )
+            return cached_result
+        if self._actual_tavily_calls >= self.max_tavily_queries:
+            logger.warning(f"[选题Agent] Tavily预算耗尽，跳过: {query[:60]}")
+            return []
+        self._actual_tavily_calls += 1
 
         api_key = self.get_config("tavily.api_key", "")
         base_url = self.get_config("tavily.base_url", "https://api.tavily.com")
@@ -418,7 +528,6 @@ class TopicAgent(BaseAgent):
         include_images = self.get_config("tavily.include_images", True)
         include_image_descriptions = self.get_config("tavily.include_image_descriptions", True)
         include_raw_content = self.get_config("tavily.include_raw_content", "markdown")  # 回退：写作需要 raw_content
-        time_range = self.get_config("tavily.time_range", "24h")
 
         payload = {
             "query": query,
@@ -463,6 +572,7 @@ class TopicAgent(BaseAgent):
                     "published_date_str": published_str,
                     "source_name": source_name,
                     "source_site": query_info.get("site", ""),
+                    "_freshness_hours": freshness_hours,
                     "_tavily_images": [],
                 }
 
@@ -485,6 +595,7 @@ class TopicAgent(BaseAgent):
             # 写入缓存
             import time
             self._search_cache[cache_key] = (time.time(), articles)
+            self._save_daily_search_cache()
 
             logger.info(
                 f"[选题Agent] Tavily | {source_name} | query='{query[:60]}' → {len(articles)} 篇"
@@ -691,7 +802,6 @@ class TopicAgent(BaseAgent):
         3. 不再保留无日期文章（避免旧文章混入）
         """
         now = datetime.now()
-        cutoff = now - timedelta(hours=self.freshness_hours)
         current_year = now.year
 
         fresh = []
@@ -699,6 +809,9 @@ class TopicAgent(BaseAgent):
         rejected_nodate = 0
 
         for c in candidates:
+            cutoff = now - timedelta(
+                hours=c.get("_freshness_hours", self.freshness_hours)
+            )
             pub = c.get("published_date")
             if pub and isinstance(pub, datetime):
                 if pub >= cutoff:
