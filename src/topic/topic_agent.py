@@ -49,8 +49,7 @@ NON_MUSIC_BLOCK_KEYWORDS = [
 
 # 明显不适合做爱豆音乐公众号封面/选题的聚合页标题
 BAD_TOPIC_PATTERNS = [
-    "artist tag", "all kpop all the time", "tag -", "/tag/",
-    "category", "archive", "profile", "author",
+    "artist tag", "all kpop all the time", "tag -",
 ]
 
 
@@ -68,28 +67,51 @@ STRONG_KPOP_MUSIC_KEYWORDS = [
     "演唱会", "巡演", "见面会", "预告", "概念照", "音源", "榜单", "出道",
 ]
 
-# 这些内容即使命中爱豆名字，也默认不做
-STRICT_NON_MUSIC_BLOCK_KEYWORDS = [
-    "subway", "cafeteria", "meal", "restaurant",
-    "politics", "political", "election",
-    "business", "economy", "economic", "finance", "financial",
-    "football", "soccer", "sports", "world cup",
-    "semiconductor", "chip cluster",
-    "actor", "actress", "drama", "movie", "film", "netflix", "series",
-    "documentary", "docu", "reality show", "variety show", "broadcast",
-    "to star in", "cast", "casting", "growth documentary",
-    "dating", "date", "breakup", "break up", "boyfriend", "girlfriend",
-    "lover", "relationship", "couple", "marriage", "divorce", "rumor",
-    "scandal", "kiss", "romance", "wedding", "pregnant",
+# 即使命中艺人也不采用的低质/生活类主题
+IDOL_TOPIC_HARD_BLOCK_KEYWORDS = [
+    "subway", "cafeteria", "cheap meal", "meal", "restaurant", "food",
     "brand reputation", "reputation rankings", "star brand reputation",
-    "演员", "女演员", "男演员", "韩剧", "电视剧", "电影", "纪录片", "综艺",
-    "出演", "主演", "参演", "选角", "恋情", "约会", "分手", "男友", "女友",
-    "恋人", "情侣", "结婚", "离婚", "传闻", "绯闻", "恋爱", "品牌声誉", "声誉榜",
+    "地铁", "食堂", "餐厅", "餐饮", "廉价餐", "品牌声誉", "声誉榜",
+]
+
+IDOL_FASHION_EVENT_KEYWORDS = [
+    "fashion week", "celine", "dior", "chanel", "brand event",
+    "airport", "after-party", "after party", "red carpet", "fashion show",
+]
+
+IDOL_BUZZ_GOSSIP_KEYWORDS = [
+    "sparks attention", "fans react", "netizens react", "goes viral", "viral",
+    "dating", "relationship", "rumor", "scandal", "controversy", "debate",
+]
+
+IDOL_LEGAL_RESPONSE_KEYWORDS = [
+    "legal action", "lawsuit", "protect", "protection", "company response",
+    "agency response", "hybe", "bighit", "sm entertainment",
+    "jyp entertainment", "yg entertainment",
+]
+
+IDOL_BUSINESS_CAREER_KEYWORDS = [
+    "investor", "investment", "startup", "business", "venture",
+    "ambassador", "collaboration", "campaign",
+]
+
+# 常见媒体写法与 TOP_STARS 中标准团名的别名
+IDOL_TARGET_ALIASES = [
+    "i-dle", "gidle", "(g)i-dle", "lesserafim",
+]
+
+AMBIGUOUS_STANDALONE_TARGETS = {
+    "Jin", "V", "RM", "Han", "Jay", "Jake", "Mark", "Ten",
+    "Rei", "Bae", "Lia", "Isa",
+}
+
+GENERIC_SCREEN_MEDIA_KEYWORDS = [
+    "actor", "actress", "drama", "movie", "film", "documentary",
+    "to star in", "cast", "casting",
 ]
 
 BAD_TOPIC_PATTERNS = [
-    "artist tag", "all kpop all the time", "tag -", "/tag/",
-    "category", "archive", "profile", "author",
+    "artist tag", "all kpop all the time", "tag -",
 ]
 
 def _is_blocked_image_url(url: str) -> bool:
@@ -190,24 +212,24 @@ class TopicAgent(BaseAgent):
                 error="未找到24小时内的候选文章（严格过滤，不回退到48h）",
             )
 
-        # Step 2.5: 音乐相关性硬过滤。必须在候选截断和评分之前执行，
-        # 避免生活、社会或商业新闻占用候选名额。
-        # 只保留韩国男团/女团/成员的音乐动态；过滤影视、恋情、分手、演员八卦、聚合页。
-        before_music_filter = len(fresh_candidates)
-        fresh_candidates = self._filter_kpop_music_topics(fresh_candidates)
+        # Step 2.5: Idol-centric 硬过滤。音乐动态优先，但成员个人、
+        # 时尚活动、粉丝热议、争议传闻、法律维权和个人事业同样允许。
+        before_idol_filter = len(fresh_candidates)
+        fresh_candidates = self._filter_idol_centric_topics(fresh_candidates)
         logger.info(
-            f"[选题Agent] K-pop音乐相关过滤: {before_music_filter} → {len(fresh_candidates)} 篇 "
-            f"(排除 {before_music_filter - len(fresh_candidates)} 篇影视/恋情/分手/聚合页)"
+            f"[选题Agent] Idol-centric过滤: {before_idol_filter} → "
+            f"{len(fresh_candidates)} 篇 "
+            f"(排除 {before_idol_filter - len(fresh_candidates)} 篇无关/低质/聚合页)"
         )
 
         if not fresh_candidates:
             return AgentResult(
                 status=AgentStatus.FAILED,
                 agent_name=self.name,
-                error="未找到合格的K-pop音乐类候选文章；影视/恋情/分手/演员八卦已过滤",
+                error="未找到明确涉及目标韩国男团、女团或成员的合格候选文章",
             )
 
-        # 只截断已经通过音乐硬过滤的候选（评分成本考虑）
+        # 只截断已经通过 Idol-centric 硬过滤的候选（评分成本考虑）
         if len(fresh_candidates) > self.candidate_count * 3:
             fresh_candidates = sorted(
                 fresh_candidates,
@@ -222,7 +244,7 @@ class TopicAgent(BaseAgent):
             return AgentResult(
                 status=AgentStatus.FAILED,
                 agent_name=self.name,
-                error="未找到涉及目标韩国男团、女团或成员的音乐候选文章",
+                error="未找到涉及目标韩国男团、女团或成员的候选文章",
             )
 
         # Step 3: 综合评分（15个字段）
@@ -484,8 +506,9 @@ class TopicAgent(BaseAgent):
 
     # 跳过聚合页/分类页 URL 模式（这类页面 raw_content 包含大量外链，导致误匹配）
     _SKIP_URL_PATTERNS = [
-        "/category/", "/cat/", "/tag/", "/tags/",
-        "/video/", "/videos/", "/playlist/",
+        "/artisttag/", "/category/", "/cat/", "/tag/", "/tags/",
+        "/profile/", "/artist/", "/movies",
+        "/playlist/",
         "/archives/", "/archive/",
         "/section/", "/topic/", "/channel/",
         "/page/", "/p=",
@@ -499,27 +522,25 @@ class TopicAgent(BaseAgent):
                 return True
         return False
 
-    def _filter_kpop_music_topics(self, candidates: List[Dict]) -> List[Dict]:
+    @staticmethod
+    def _contains_topic_keyword(text: str, keyword: str) -> bool:
+        """英文关键词按单词边界匹配，避免短词在普通 URL 中误命中。"""
+        keyword = keyword.lower()
+        if re.fullmatch(r"[a-z0-9][a-z0-9 -]*", keyword):
+            escaped = re.escape(keyword).replace(r"\ ", r"\s+")
+            return re.search(
+                rf"(?<![a-z0-9]){escaped}s?(?![a-z0-9])",
+                text,
+            ) is not None
+        return keyword in text
+
+    def _filter_idol_centric_topics(self, candidates: List[Dict]) -> List[Dict]:
         """
-        硬过滤：只保留韩国男团/女团/成员的音乐动态。
-        规则：
-        1. 只有标题或 URL 命中非音乐排除词，才直接过滤。
-        2. 只有标题、URL 或搜索摘要明确命中强音乐关键词，才允许进入评分。
-        3. 不读取正文或 raw_content，避免模板、侧栏和推荐链接造成误判。
-        4. 标题/URL 同时命中目标艺人和强音乐词时，记录为强音乐优先保留。
+        Idol-centric 硬过滤：标题、URL 或摘要必须明确命中目标团体/成员。
+        音乐新闻优先，但个人动态、时尚活动、热议八卦、法律维权及
+        商业事业均可进入评分。正文和 raw_content 不参与艺人准入判断。
         """
         filtered = []
-
-        def contains_keyword(text: str, keyword: str) -> bool:
-            """英文关键词按单词边界匹配，避免 mv/ep 在普通 URL 中误命中。"""
-            keyword = keyword.lower()
-            if re.fullmatch(r"[a-z0-9][a-z0-9 -]*", keyword):
-                escaped = re.escape(keyword).replace(r"\ ", r"\s+")
-                return re.search(
-                    rf"(?<![a-z0-9]){escaped}s?(?![a-z0-9])",
-                    text,
-                ) is not None
-            return keyword in text
 
         for article in candidates:
             title = article.get("title", "") or ""
@@ -530,93 +551,102 @@ class TopicAgent(BaseAgent):
                 or ""
             )
 
-            title_url = f"{title} {url}".lower()
-            qualification_text = f"{title} {url} {search_summary}".lower()
+            visible_text = f"{title} {url} {search_summary}".lower()
 
-            # 聚合页、标签页、作者页、档案页不做
-            if any(p in title_url for p in BAD_TOPIC_PATTERNS):
-                logger.info(f"[选题Agent] 🚫 跳过聚合页/标签页: {title[:80]} | {url[:80]}")
-                continue
-
-            blocked_keyword = next(
-                (
-                    keyword
-                    for keyword in STRICT_NON_MUSIC_BLOCK_KEYWORDS
-                    if contains_keyword(title_url, keyword)
-                ),
-                None,
-            )
-            if blocked_keyword:
+            if self._is_aggregate_page(url) or any(
+                p in visible_text for p in BAD_TOPIC_PATTERNS
+            ):
                 logger.info(
-                    f"[选题Agent] 🚫 过滤非音乐标题/URL "
-                    f"(命中 '{blocked_keyword}'): {title[:80]} | {url[:80]}"
-                )
-                continue
-
-            music_keyword = next(
-                (
-                    keyword
-                    for keyword in STRONG_KPOP_MUSIC_KEYWORDS
-                    if contains_keyword(qualification_text, keyword)
-                ),
-                None,
-            )
-            if not music_keyword:
-                logger.info(
-                    f"[选题Agent] 🚫 过滤：标题/URL/摘要未命中强音乐词: "
-                    f"{title[:80]} | {url[:80]}"
+                    f"[选题Agent] 🚫 过滤聚合页/标签页: {title[:80]} | {url[:80]}"
                 )
                 continue
 
             target_hits = [
-                star
-                for star in ScoringSystem.TOP_STARS
-                if ScoringSystem._match_star(star, title_url)
+                star for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, visible_text)
             ]
-            if target_hits:
+            target_hits.extend(
+                alias for alias in IDOL_TARGET_ALIASES
+                if self._contains_topic_keyword(visible_text, alias)
+            )
+            if not target_hits:
                 logger.info(
-                    f"[选题Agent] ✅ 强音乐优先保留 "
-                    f"(艺人={target_hits[:3]}, 音乐词='{music_keyword}'): "
+                    f"[选题Agent] 🚫 过滤：标题/URL/摘要未命中目标团体或成员: "
                     f"{title[:80]}"
                 )
-            else:
+                continue
+
+            media_keyword = next((
+                keyword for keyword in GENERIC_SCREEN_MEDIA_KEYWORDS
+                if self._contains_topic_keyword(visible_text, keyword)
+            ), None)
+            unambiguous_hits = [
+                hit for hit in target_hits
+                if hit not in AMBIGUOUS_STANDALONE_TARGETS
+            ]
+            if media_keyword and not unambiguous_hits:
                 logger.info(
-                    f"[选题Agent] ✅ 音乐信号通过 "
-                    f"(音乐词='{music_keyword}'，待目标艺人过滤): {title[:80]}"
+                    f"[选题Agent] 🚫 过滤普通影视内容：仅命中歧义短名 "
+                    f"{target_hits[:3]}，影视词='{media_keyword}': {title[:80]}"
                 )
+                continue
+
+            blocked_keyword = next((
+                keyword for keyword in IDOL_TOPIC_HARD_BLOCK_KEYWORDS
+                if self._contains_topic_keyword(visible_text, keyword)
+            ), None)
+            if blocked_keyword:
+                logger.info(
+                    f"[选题Agent] 🚫 过滤低质/生活主题 "
+                    f"(艺人={target_hits[:3]}, 命中='{blocked_keyword}'): {title[:80]}"
+                )
+                continue
+
+            categories = [
+                ("音乐动态", STRONG_KPOP_MUSIC_KEYWORDS),
+                ("时尚活动", IDOL_FASHION_EVENT_KEYWORDS),
+                ("八卦热议", IDOL_BUZZ_GOSSIP_KEYWORDS),
+                ("法律维权", IDOL_LEGAL_RESPONSE_KEYWORDS),
+                ("商业/个人事业", IDOL_BUSINESS_CAREER_KEYWORDS),
+            ]
+            category = "爱豆个人动态"
+            reason = "明确命中目标艺人"
+            for category_name, keywords in categories:
+                hit = next((
+                    keyword for keyword in keywords
+                    if self._contains_topic_keyword(visible_text, keyword)
+                ), None)
+                if hit:
+                    category, reason = category_name, f"命中 '{hit}'"
+                    break
+
+            logger.info(
+                f"[选题Agent] ✅ {category}通过 "
+                f"(艺人={target_hits[:3]}, {reason}): {title[:80]}"
+            )
             filtered.append(article)
 
         return filtered
+
+    def _filter_kpop_music_topics(self, candidates: List[Dict]) -> List[Dict]:
+        """向后兼容旧调用；实际执行 Idol-centric 过滤。"""
+        return self._filter_idol_centric_topics(candidates)
 
     def _filter_top_stars(self, candidates: List[Dict]) -> List[Dict]:
         """过滤出真正关于顶流明星的文章
 
         匹配策略（避免侧边栏/推荐链接导致的误匹配）：
-        1. 标题中命中顶流明星 → 直接通过（强信号）
-        2. 内容中命中2个以上不同顶流明星 → 通过（多明星提及，可能是真正娱乐新闻）
-        3. 内容中仅命中1个明星但标题不含娱乐关键词 → 拒绝（可能是非娱乐文章碰巧提及）
+        标题、URL 或摘要必须命中目标艺人。正文/侧栏不用于准入，
+        避免偶然提及造成误判。
         """
         from src.topic.scoring import ScoringSystem
-
-        # 非娱乐类文章标题关键词（出现这些关键词的文章直接拒绝）
-        NON_ENTERTAINMENT_KEYWORDS = [
-            "항공", "유류", "flight", "airline", "fuel surcharge",  # 航空
-            "모바일", "mobile game", "게임 출시", "game launch",  # 游戏
-            "증권", "주식", "stock", "financial", "earnings",  # 金融
-            "부동산", "real estate", "property",  # 房产
-            "선거", "election", "정치", "politics",  # 政治
-            "스포츠", "sports", "축구", "야구",  # 体育
-            "날씨", "weather", "기상",  # 天气
-        ]
 
         filtered = []
         for c in candidates:
             url = c.get("url", "")
             title = (c.get("title") or "")
-            content = (c.get("content") or "")
-            raw = (c.get("raw_content") or "")
-            title_lower = title.lower()
-            content_text = content + " " + raw
+            summary = (c.get("summary") or c.get("description") or "")
+            visible_text = f"{title} {url} {summary}"
 
             # 仅跳过明确的聚合页/分类页；/news/<slug> 是正常文章链接
             if self._is_aggregate_page(url):
@@ -626,51 +656,27 @@ class TopicAgent(BaseAgent):
                 )
                 continue
 
-            # 先检查是否为非娱乐文章
-            is_non_entertainment = False
-            for kw in NON_ENTERTAINMENT_KEYWORDS:
-                if kw in title_lower:
-                    is_non_entertainment = True
-                    logger.info(
-                        f"[选题Agent] 跳过非娱乐文章(标题含'{kw}'): '{title[:40]}'"
-                    )
-                    break
-
-            if is_non_entertainment:
-                continue
-
-            # 检查标题中是否命中顶流明星（强信号）
-            title_star_hits = []
+            visible_star_hits = []
             for star in ScoringSystem.TOP_STARS:
-                if ScoringSystem._match_star(star, title):
-                    title_star_hits.append(star)
+                if ScoringSystem._match_star(star, visible_text):
+                    visible_star_hits.append(star)
+            visible_star_hits.extend(
+                alias for alias in IDOL_TARGET_ALIASES
+                if self._contains_topic_keyword(visible_text.lower(), alias)
+            )
 
-            if title_star_hits:
+            if visible_star_hits:
                 filtered.append(c)
                 logger.info(
-                    f"[选题Agent] ✅ 顶流过滤通过：标题命中目标艺人 "
-                    f"{title_star_hits}: '{title[:60]}'"
+                    f"[选题Agent] ✅ 目标艺人过滤通过 "
+                    f"{visible_star_hits[:3]}: '{title[:60]}'"
                 )
                 continue
 
-            # 标题未命中，检查内容中命中多少个不同明星
-            content_star_hits = set()
-            for star in ScoringSystem.TOP_STARS:
-                if ScoringSystem._match_star(star, content_text):
-                    content_star_hits.add(star)
-
-            if len(content_star_hits) >= 2:
-                # 内容中命中2个以上不同明星，可能是真正娱乐新闻
-                filtered.append(c)
-                logger.info(
-                    f"[选题Agent] ✅ 顶流过滤通过：内容命中"
-                    f"{len(content_star_hits)}个目标艺人: '{title[:60]}'"
-                )
-            else:
-                logger.info(
-                    f"[选题Agent] 🚫 顶流过滤：标题未命中目标艺人，"
-                    f"内容仅命中{len(content_star_hits)}个: '{title[:60]}'"
-                )
+            logger.info(
+                f"[选题Agent] 🚫 目标艺人过滤：标题/URL/摘要未命中: "
+                f"'{title[:60]}'"
+            )
 
         return filtered
 

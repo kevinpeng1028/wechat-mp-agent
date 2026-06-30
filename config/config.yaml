@@ -68,19 +68,19 @@ topic_agent:
     - name: "Soompi"
       site: "soompi.com"
       lang: "en"
-      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM"
+      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM idol member fashion airport fans react viral dating rumor controversy brand event"
     - name: "AllKpop"
       site: "allkpop.com"
       lang: "en"
-      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM"
+      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM idol member fashion airport fans react viral dating rumor controversy brand event"
     - name: "Koreaboo"
       site: "koreaboo.com"
       lang: "en"
-      query_suffix: "BTS BLACKPINK NewJeans aespa IVE LESSERAFIM Stray Kids SEVENTEEN TXT"
+      query_suffix: "BTS BLACKPINK NewJeans aespa IVE LESSERAFIM Stray Kids SEVENTEEN TXT idol member fashion airport netizens react viral dating rumor controversy brand event"
     - name: "SBS Star"
       site: "sbsstar.net"
       lang: "en"
-      query_suffix: "BTS BLACKPINK NewJeans IVE aespa Stray Kids SEVENTEEN TXT ENHYPEN"
+      query_suffix: "BTS BLACKPINK NewJeans IVE aespa Stray Kids SEVENTEEN TXT ENHYPEN idol member fashion airport fans react viral dating rumor controversy brand event"
     # Korea JoongAng Daily 暂停启用：综合新闻源会混入社会、商业和生活内容。
 
   # 通用搜索关键词 — 已禁用（无站点限制，返回内容不精准）

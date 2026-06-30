@@ -24,6 +24,23 @@ def test_keeps_mini_album_concept_photos():
     assert filter_topics(article) == [article]
 
 
+def test_idol_centric_allowed_examples():
+    titles = [
+        "i-dle brings out their mature allure against the golden hour "
+        "in new MV teaser",
+        "BTS's Suga Revealed To Be An Early Investor In SpaceX",
+        "BTS V's Actions After Leaving Club At 1AM Sparks Attention",
+        "Video Of BTS's V From Fashion Week Linked To Cosmetic Procedure Debate",
+    ]
+    for title in titles:
+        article = {
+            "title": title,
+            "url": "https://example.com/article/idol-story",
+            "summary": "",
+        }
+        assert filter_topics(article) == [article]
+
+
 def test_keeps_enhypen_japan_single_mv_despite_body_template_words():
     article = {
         "title": "ENHYPEN brings warmth and hope in new Japan single "
@@ -48,6 +65,15 @@ def test_normal_news_article_url_is_not_an_aggregate_page():
             "raw_content": "",
         }]
     )
+    assert not agent._is_aggregate_page(
+        "https://www.allkpop.com/video/2026/06/idol-performance"
+    )
+    assert not agent._is_aggregate_page(
+        "https://example.com/article/idol-fashion"
+    )
+    assert agent._is_aggregate_page("https://example.com/artisttag/bts")
+    assert agent._is_aggregate_page("https://example.com/artist/bts")
+    assert agent._is_aggregate_page("https://example.com/movies")
 
 
 def test_raw_content_cannot_create_music_signal():
@@ -73,9 +99,12 @@ def test_rejects_explicit_non_music_titles():
     titles = [
         "Seoul subway station cafeterias offer cheap meals",
         "June Brand Reputation rankings announced",
-        "Idol documentary film gets release date",
+        "Chai Jin Xin and Samuel to star in new growth documentary",
+        "South Korean Film News & Reviews",
+        "Lee defends Honam semiconductor cluster",
         "Politics and semiconductor business outlook",
         "Football transfer news",
+        "World Cup economy report",
     ]
     for title in titles:
         assert filter_topics({
@@ -83,6 +112,17 @@ def test_rejects_explicit_non_music_titles():
             "url": "https://example.com/story",
             "summary": "Unrelated news.",
         }) == []
+
+
+def test_body_only_idol_mention_does_not_qualify():
+    article = {
+        "title": "South Korean economy and semiconductor update",
+        "url": "https://example.com/business",
+        "summary": "Industry-wide reporting.",
+        "content": "A sidebar happens to mention BTS and aespa.",
+        "raw_content": "Recommended: BLACKPINK airport fashion.",
+    }
+    assert filter_topics(article) == []
 
 
 def test_single_qualified_article_is_not_padded():
