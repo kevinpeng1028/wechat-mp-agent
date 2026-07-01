@@ -447,14 +447,8 @@ class TemplateManager:
         return f'<img src="{url}" style="width:100%;max-width:100%;height:auto;display:block;margin:18px auto;border-radius:6px;object-fit:contain;" />'
 
     def _render_caption(self, img: Dict, template: Dict) -> str:
-        """使用模板渲染图片说明"""
-        caption = img.get("caption", img.get("description", ""))
-        if not caption:
-            return ""
-        return (
-            f'<p style="font-size:13px;line-height:1.6;color:#999999;'
-            f'text-align:center;margin:-6px 0 18px;">{self._escape(caption)}</p>'
-        )
+        """默认不展示自动图片说明、文件名或技术元数据。"""
+        return ""
 
     def _render_image_default(self, img: Dict, img_cfg: Dict) -> str:
         """默认排版渲染图片"""
@@ -471,18 +465,8 @@ class TemplateManager:
         )
 
     def _render_caption_default(self, img: Dict, cap_cfg: Dict) -> str:
-        """默认排版渲染图片说明"""
-        caption = img.get("caption", img.get("description", ""))
-        if not caption:
-            return ""
-        return (
-            f'<p style="font-size:{cap_cfg.get("font_size","13px")};'
-            f'line-height:{cap_cfg.get("line_height","1.6")};'
-            f'color:{cap_cfg.get("color","#999999")};'
-            f'text-align:{cap_cfg.get("text_align","center")};'
-            f'margin:{cap_cfg.get("margin","-6px 0 18px")};">'
-            f'{self._escape(caption)}</p>'
-        )
+        """默认不展示自动图片说明、文件名或技术元数据。"""
+        return ""
 
     def _render_intro(self, intro: str, template: Dict) -> str:
         """渲染导语段"""

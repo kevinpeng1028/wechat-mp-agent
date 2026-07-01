@@ -113,18 +113,53 @@ class ScoringSystem:
 
     @classmethod
     def _match_star(cls, star: str, text: str) -> bool:
-        """检查文本中是否包含明星名（短英文名用单词边界，韩文名用子串）"""
+        """严格匹配艺人名；短团名需要词边界和 K-pop 上下文。"""
+        import re
+
+        kpop_context = (
+            r"k-?pop|idol|hybe|bighit|sm(?: entertainment)?|"
+            r"jyp(?: entertainment)?|yg(?: entertainment)?|starship|ador|"
+            r"source music|girl group|boy group|comeback|music video|\bmv\b|"
+            r"teaser|album|concert|fans?|netizens?|airport|fashion week|"
+            r"music show|member|wonyoung|yujin|gaeul|\brei\b|\bliz\b|leeseo|"
+            r"taehyung|jungkook|jimin|suga|\bjin\b|jennie|lisa|karina"
+        )
+
+        if star == "V":
+            return bool(re.search(
+                r"(?:\bBTS(?:'s)?\s+V\b|\bV\s+of\s+BTS\b|"
+                r"\bKim\s+Taehyung\b|\bTaehyung\b)",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
+        if star == "IVE":
+            # 保留大小写以排除 Jony Ive、I've、Ive-designed。
+            has_name = bool(re.search(r"(?<![A-Za-z])IVE(?:'s)?(?![A-Za-z-])", text))
+            return has_name and bool(re.search(kpop_context, text, re.IGNORECASE))
+
+        if star in {"TXT", "NCT", "ITZY", "RIIZE"}:
+            has_name = bool(re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(star)}(?:'s)?(?![A-Za-z0-9-])",
+                text,
+            ))
+            return has_name and bool(re.search(kpop_context, text, re.IGNORECASE))
+
         star_lower = star.lower()
         text_lower = text.lower()
-        
-        if star in cls.SHORT_ENGLISH_STARS:
-            # 短英文名用单词边界匹配
-            import re
-            pattern = r'\b' + re.escape(star_lower) + r'\b'
+
+        if re.search(r"[A-Za-z]", star):
+            # 所有拉丁字母艺人名都使用严格边界，避免 Ten→attends、
+            # Ive→creative 等普通单词子串误判。
+            pattern = (
+                r"(?<![A-Za-z0-9])"
+                + re.escape(star_lower)
+                + r"(?![A-Za-z0-9])"
+            )
             return bool(re.search(pattern, text_lower))
-        else:
-            # 韩文名和长英文名用子串匹配
-            return star_lower in text_lower
+
+        # 韩文名使用子串匹配
+        return star_lower in text_lower
 
     # 明确排除的低热度关键词（出现这些的文章降分）
     LOW_HEAT_KEYWORDS = [

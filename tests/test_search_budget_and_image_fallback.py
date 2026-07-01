@@ -126,6 +126,22 @@ def test_tiered_search_respects_total_budget():
     assert agent._actual_tavily_calls <= 10
 
 
+def test_supplemental_queries_are_site_restricted():
+    agent = object.__new__(TopicAgent)
+    agent.get_config = lambda key, default=None: default
+    tiers = agent._build_tiered_search_queries()
+
+    assert tiers["supplemental"]
+    assert all(query["site"] for query in tiers["supplemental"])
+    assert all(query["query"].startswith("site:") for query in tiers["supplemental"])
+    assert all(
+        agent._is_allowed_source_url(f"https://{query['site']}/article/test")
+        for query in tiers["supplemental"]
+    )
+    assert not agent._is_allowed_source_url("https://www.cbsnews.com/fashion-week")
+    assert not agent._is_allowed_source_url("https://www.tmz.com/relationship-rumor")
+
+
 def test_credit_budget_and_hard_stop():
     agent = object.__new__(TopicAgent)
     agent.max_total_tavily_credits = 12

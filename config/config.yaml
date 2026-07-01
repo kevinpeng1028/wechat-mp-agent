@@ -174,9 +174,9 @@ writer_agent:
   default_style: "idol_observation"
   styles:
     idol_observation:
-      tone: "审美观察、克制、有余味"
+      tone: "轻快自然的中文韩娱快讯，有观察感但不饭圈化"
       length_range: [200, 800]       # 200-800字
-      structure: ["状态引入", "气质风格观察", "余味收尾"]
+      structure: ["一句话点题", "公开信息与看点", "讨论焦点", "轻收束"]
 
   # 禁止编造规则
   fabrication_rules:
@@ -207,6 +207,14 @@ writer_agent:
     - "妈生好皮"
     - "生图杀手"
     - "撕漫脸"
+    - "据悉"
+    - "此外"
+    - "值得注意的是"
+    - "引发广泛关注"
+    - "具有重要意义"
+    - "展现出强大的国际影响力"
+    - "从行业角度来看"
+    - "文化输出"
 
   # 允许的安全表达
   safe_expressions:
@@ -230,15 +238,15 @@ writer_agent:
 
   # 段落规则
   paragraph_rules:
-    min_chars: 40                  # 段落最少40字
-    max_chars: 90                  # 段落最多90字
+    min_chars: 25                  # 韩娱快讯使用更短段落
+    max_chars: 80
     split_threshold: 120           # 超过120字自动拆分
     short_paragraphs: true         # 短段落，适合公众号
 
   # SEO 标题
   seo_title:
     max_length: 30
-    style: "观察类"               # 观察类标题，不是标题党
+    style: "韩娱资讯快讯"          # 艺人名优先、信息点明确
 
   # 摘要
   summary_max_chars: 120
@@ -279,6 +287,7 @@ formatter_agent:
 
     # 图片说明
     caption:
+      enabled: false
       font_size: "13px"
       line_height: "1.6"
       color: "#999999"

@@ -253,6 +253,20 @@ class FormattingAgent(BaseAgent):
         html = re.sub(r'<iframe[^>]*>.*?</iframe>', '', html, flags=re.DOTALL | re.IGNORECASE)
         # 移除外部 CSS link
         html = re.sub(r'<link[^>]*rel=["\']stylesheet["\'][^>]*>', '', html, flags=re.IGNORECASE)
+        # 默认移除所有图片说明，避免文件名、URL、Tavily 描述等技术文字
+        html = re.sub(
+            r'<figcaption[^>]*>.*?</figcaption>',
+            '',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        html = re.sub(
+            r'<p[^>]*style=["\'][^"\']*(?:font-size\s*:\s*13px|'
+            r'color\s*:\s*#999999)[^"\']*["\'][^>]*>.*?</p>',
+            '',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
         return html
 
     async def _save_html(self, article: Dict):

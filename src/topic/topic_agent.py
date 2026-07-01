@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -98,7 +99,16 @@ IDOL_BUSINESS_CAREER_KEYWORDS = [
 # 常见媒体写法与 TOP_STARS 中标准团名的别名
 IDOL_TARGET_ALIASES = [
     "i-dle", "gidle", "(g)i-dle", "lesserafim",
+    "hybe", "bighit", "sm entertainment", "jyp entertainment",
+    "yg entertainment",
 ]
+
+ALLOWED_KPOP_SOURCE_DOMAINS = {
+    "koreaboo.com", "allkpop.com", "soompi.com", "sbsstar.net",
+    "kpopstarz.com", "nme.com", "billboard.com", "osen.co.kr",
+    "starnewskorea.com", "newsen.com", "xportsnews.com", "mydaily.co.kr",
+    "dispatch.co.kr", "tenasia.hankyung.com", "entertain.naver.com",
+}
 
 AMBIGUOUS_STANDALONE_TARGETS = {
     "Jin", "V", "RM", "Han", "Jay", "Jake", "Mark", "Ten",
@@ -451,14 +461,12 @@ class TopicAgent(BaseAgent):
             ("xportsnews.com", "XportsNews", "BTS BLACKPINK aespa IVE"),
             ("mydaily.co.kr", "MyDaily", "BTS BLACKPINK aespa IVE"),
             ("dispatch.co.kr", "Dispatch", "BTS BLACKPINK aespa IVE"),
-            ("tenasia.com", "TenAsia", "BTS BLACKPINK aespa IVE"),
-            ("sports.chosun.com", "Sports Chosun", "BTS BLACKPINK aespa IVE"),
-            ("tvreport.co.kr", "TVReport", "BTS BLACKPINK aespa IVE"),
+            ("tenasia.hankyung.com", "TenAsia", "BTS BLACKPINK aespa IVE"),
         ]
         supplemental = [
-            ("", "supplemental", "BTS BLACKPINK aespa IVE fans react goes viral airport fashion week brand event"),
-            ("", "supplemental", "BTS BLACKPINK Stray Kids dating rumor controversy"),
-            ("", "supplemental", "HYBE responds SM responds JYP responds YG responds protects artists legal action"),
+            ("koreaboo.com", "Koreaboo supplemental", "BTS BLACKPINK aespa IVE fans react goes viral airport fashion week brand event"),
+            ("allkpop.com", "AllKpop supplemental", "BTS BLACKPINK Stray Kids dating rumor controversy"),
+            ("soompi.com", "Soompi supplemental", "HYBE responds SM responds JYP responds YG responds protects artists legal action"),
         ]
         primary_hours = self.get_config(
             "topic_agent.search.freshness_hours_primary", 24
@@ -634,6 +642,12 @@ class TopicAgent(BaseAgent):
                     "_tavily_images": [],
                 }
 
+                if not self._is_allowed_source_url(article["url"]):
+                    logger.info(
+                        f"[选题Agent] 🚫 非韩娱白名单来源: {article['url'][:100]}"
+                    )
+                    continue
+
                 # 只使用该文章自己的图片（r.get("images")），不使用全局 top_images
                 # 限制每篇文章最多3张图片，减少 Tavily 消耗
                 # 同时过滤 LOGO/广告/选秀等无效图片
@@ -728,6 +742,35 @@ class TopicAgent(BaseAgent):
             ) is not None
         return keyword in text
 
+    @staticmethod
+    def _is_allowed_source_url(url: str) -> bool:
+        host = urlparse(url).netloc.lower().split(":")[0]
+        return any(
+            host == domain or host.endswith("." + domain)
+            for domain in ALLOWED_KPOP_SOURCE_DOMAINS
+        )
+
+    def _match_target_alias(self, alias: str, text: str) -> bool:
+        if alias in {
+            "hybe", "bighit", "sm entertainment", "jyp entertainment",
+            "yg entertainment",
+        }:
+            return self._contains_topic_keyword(text, alias) and bool(re.search(
+                r"responds?|protect(?:s|ing|ion)?|legal action|lawsuit|artists?",
+                text,
+                re.IGNORECASE,
+            ))
+        if alias in {"i-dle", "gidle", "(g)i-dle"}:
+            if not self._contains_topic_keyword(text, alias):
+                return False
+            return bool(re.search(
+                r"k-?pop|idol|comeback|\bmv\b|teaser|album|concert|"
+                r"fans?|netizens?|airport|fashion week|member",
+                text,
+                re.IGNORECASE,
+            ))
+        return self._contains_topic_keyword(text, alias)
+
     def _filter_idol_centric_topics(self, candidates: List[Dict]) -> List[Dict]:
         """
         Idol-centric 硬过滤：标题、URL 或摘要必须明确命中目标团体/成员。
@@ -745,7 +788,8 @@ class TopicAgent(BaseAgent):
                 or ""
             )
 
-            visible_text = f"{title} {url} {search_summary}".lower()
+            visible_text_raw = f"{title} {url} {search_summary}"
+            visible_text = visible_text_raw.lower()
 
             if self._is_aggregate_page(url) or any(
                 p in visible_text for p in BAD_TOPIC_PATTERNS
@@ -757,11 +801,11 @@ class TopicAgent(BaseAgent):
 
             target_hits = [
                 star for star in ScoringSystem.TOP_STARS
-                if ScoringSystem._match_star(star, visible_text)
+                if ScoringSystem._match_star(star, visible_text_raw)
             ]
             target_hits.extend(
                 alias for alias in IDOL_TARGET_ALIASES
-                if self._contains_topic_keyword(visible_text, alias)
+                if self._match_target_alias(alias, visible_text)
             )
             if not target_hits:
                 logger.info(
@@ -856,7 +900,7 @@ class TopicAgent(BaseAgent):
                     visible_star_hits.append(star)
             visible_star_hits.extend(
                 alias for alias in IDOL_TARGET_ALIASES
-                if self._contains_topic_keyword(visible_text.lower(), alias)
+                if self._match_target_alias(alias, visible_text.lower())
             )
 
             if visible_star_hits:

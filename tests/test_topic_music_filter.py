@@ -1,4 +1,5 @@
 from src.topic.topic_agent import TopicAgent
+from src.topic.scoring import ScoringSystem
 
 
 def filter_topics(*articles):
@@ -39,6 +40,45 @@ def test_idol_centric_allowed_examples():
             "summary": "",
         }
         assert filter_topics(article) == [article]
+
+
+def test_short_artist_names_require_strict_kpop_context():
+    rejected = [
+        "Ferrari Replaces Marketing Chief After Its Jony Ive-Designed EV Got Roasted",
+        "Jony Ive-designed EV",
+        "Apple designer presents a creative private drive",
+        "V attends a generic event",
+    ]
+    for title in rejected:
+        assert filter_topics({
+            "title": title,
+            "url": "https://example.com/story",
+            "summary": "",
+        }) == []
+
+    allowed = [
+        "IVE Wonyoung airport fashion goes viral",
+        "IVE comeback teaser released",
+        "BTS V at CELINE after-party",
+        "BTS's V fashion week appearance",
+        "BTS Jungkook and Jimin controversy",
+        "i-dle MV teaser",
+        "HYBE legal action protecting artists",
+        "BLACKPINK Jennie brand event",
+        "aespa Karina fashion week",
+        "Stray Kids concert MV controversy",
+    ]
+    for title in allowed:
+        assert filter_topics({
+            "title": title,
+            "url": "https://example.com/article",
+            "summary": "",
+        })
+
+    assert not ScoringSystem._match_star("IVE", "Jony Ive-designed EV")
+    assert ScoringSystem._match_star("IVE", "IVE comeback teaser")
+    assert not ScoringSystem._match_star("V", "V at a generic event")
+    assert ScoringSystem._match_star("V", "V of BTS at CELINE")
 
 
 def test_keeps_enhypen_japan_single_mv_despite_body_template_words():
