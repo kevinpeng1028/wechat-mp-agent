@@ -148,14 +148,50 @@ class TopicAgent(BaseAgent):
         self.selected_count = search_cfg.get("selected_count", 2)
         self.freshness_hours = search_cfg.get("freshness_hours", 24)
         self.min_images = search_cfg.get("min_images_per_article", 1)
-        self.max_tavily_queries = search_cfg.get("max_tavily_queries", 10)
+        self.max_core_tavily_queries = search_cfg.get(
+            "max_core_tavily_queries", 6
+        )
         self.max_extra_tavily_queries = search_cfg.get("max_extra_tavily_queries", 4)
+        self.max_image_search_queries = search_cfg.get("max_image_search_queries", 2)
+        self.max_total_tavily_credits = search_cfg.get(
+            "max_total_tavily_credits_per_run", 12
+        )
+        self.hard_stop_tavily_credits = search_cfg.get(
+            "hard_stop_tavily_credits_per_run", 20
+        )
+        self.absolute_max_tavily_credits = search_cfg.get(
+            "absolute_max_tavily_credits_per_run", 50
+        )
+        configured_depth = search_cfg.get("search_depth", "basic")
+        allow_advanced = search_cfg.get("allow_advanced_search", False)
+        self.search_depth = (
+            configured_depth
+            if configured_depth != "advanced" or allow_advanced
+            else "basic"
+        )
+        self.auto_parameters = bool(search_cfg.get("auto_parameters", False))
+        self.max_tavily_queries = (
+            self.max_core_tavily_queries + self.max_extra_tavily_queries
+        )
         self.use_search_cache = search_cfg.get("use_search_cache", True)
         self.min_candidates_before_extra = search_cfg.get(
             "min_candidates_before_extra_search", 3
         )
         self._actual_tavily_calls = 0
         self._cache_hits = 0
+        self._core_tavily_calls = 0
+        self._extra_tavily_calls = 0
+        self._tavily_budget = {
+            "calls": 0,
+            "credits": 0,
+            "cache_hits": 0,
+            "image_calls": 0,
+            "max_image_calls": self.max_image_search_queries,
+            "max_total_credits": self.max_total_tavily_credits,
+            "hard_stop_credits": self.hard_stop_tavily_credits,
+            "absolute_max_credits": self.absolute_max_tavily_credits,
+            "hard_stop_triggered": False,
+        }
         # 进程内缓存 + 同日磁盘缓存
         self._search_cache: Dict[str, Tuple[float, List[Dict]]] = {}
         project_root = Path((config or {}).get("project_root", "."))
@@ -325,6 +361,7 @@ class TopicAgent(BaseAgent):
                 "ready_count": len(ready_articles),
                 "selected_topics": selected,
                 "ready_articles": ready_articles,
+                "tavily_budget": self._tavily_budget,
                 "all_scored": scored_sorted[:10],  # 保留前10名供参考
                 "trigger_type": context.get("trigger_type", "manual"),
             },
@@ -350,10 +387,16 @@ class TopicAgent(BaseAgent):
         seen_urls = set()
         tiers = self._build_tiered_search_queries()
 
-        async def run_queries(queries: List[Dict]):
-            remaining = max(0, self.max_tavily_queries - self._actual_tavily_calls)
+        async def run_queries(queries: List[Dict], purpose: str, limit: int):
+            used = (
+                self._core_tavily_calls if purpose == "core"
+                else self._extra_tavily_calls
+            )
+            remaining = max(0, limit - used)
             for i in range(0, min(len(queries), remaining), 3):
                 batch = queries[i:i + min(3, remaining - i)]
+                for query in batch:
+                    query["budget_purpose"] = purpose
                 results = await asyncio.gather(
                     *(self._tavily_search(query) for query in batch)
                 )
@@ -364,19 +407,29 @@ class TopicAgent(BaseAgent):
                             seen_urls.add(url)
                             all_results.append(article)
 
-        await run_queries(tiers["primary"])
+        await run_queries(
+            tiers["primary"], "core", self.max_core_tavily_queries
+        )
         eligible = len(self._filter_idol_centric_topics(all_results))
         if eligible < self.min_candidates_before_extra:
-            await run_queries(tiers["secondary"][:self.max_extra_tavily_queries])
+            await run_queries(
+                tiers["secondary"], "extra", self.max_extra_tavily_queries
+            )
             eligible = len(self._filter_idol_centric_topics(all_results))
         if eligible < 2:
-            await run_queries(tiers["supplemental"][:self.max_extra_tavily_queries])
+            remaining_extra = max(
+                0, self.max_extra_tavily_queries - self._extra_tavily_calls
+            )
+            await run_queries(tiers["supplemental"], "extra", remaining_extra)
 
         logger.info(
             f"[选题Agent] Tavily搜索完成: {len(all_results)} 篇独特文章 | "
-            f"实际调用 {self._actual_tavily_calls}/{self.max_tavily_queries} | "
+            f"实际调用 {self._actual_tavily_calls} | "
+            f"预计credits {self._tavily_budget['credits']}/"
+            f"{self.max_total_tavily_credits} | "
             f"缓存命中 {self._cache_hits} | "
-            f"剩余预算 {max(0, self.max_tavily_queries-self._actual_tavily_calls)}"
+            f"剩余credits {max(0, self.max_total_tavily_credits-self._tavily_budget['credits'])} | "
+            f"hard stop={self._tavily_budget['hard_stop_triggered']}"
         )
         return all_results
 
@@ -510,32 +563,37 @@ class TopicAgent(BaseAgent):
 
         if self.use_search_cache and cache_key in self._search_cache:
             self._cache_hits += 1
+            self._tavily_budget["cache_hits"] += 1
             cached_result = self._search_cache[cache_key][1]
             logger.info(
                 f"[选题Agent] 🗄️ 命中当日缓存 | {source_name} | "
                 f"query='{query[:50]}' → {len(cached_result)} 篇"
             )
             return cached_result
-        if self._actual_tavily_calls >= self.max_tavily_queries:
-            logger.warning(f"[选题Agent] Tavily预算耗尽，跳过: {query[:60]}")
+        credit_cost = 2 if self.search_depth == "advanced" else 1
+        if not self._reserve_tavily_credits(credit_cost, query):
             return []
         self._actual_tavily_calls += 1
+        self._tavily_budget["calls"] += 1
+        purpose = query_info.get("budget_purpose", "core")
+        if purpose == "core":
+            self._core_tavily_calls += 1
+        else:
+            self._extra_tavily_calls += 1
 
         api_key = self.get_config("tavily.api_key", "")
         base_url = self.get_config("tavily.base_url", "https://api.tavily.com")
-        search_depth = self.get_config("tavily.search_depth", "advanced")
         max_results = min(self.get_config("tavily.max_results", 10), 3)  # 优化：每次最多3条，降低费用
-        include_images = self.get_config("tavily.include_images", True)
-        include_image_descriptions = self.get_config("tavily.include_image_descriptions", True)
-        include_raw_content = self.get_config("tavily.include_raw_content", "markdown")  # 回退：写作需要 raw_content
 
         payload = {
             "query": query,
-            "search_depth": search_depth,
+            "search_depth": self.search_depth,
+            "auto_parameters": False,
+            "include_answer": False,
             "max_results": max_results,
-            "include_images": include_images,
-            "include_image_descriptions": include_image_descriptions,
-            "include_raw_content": include_raw_content,
+            "include_images": True,
+            "include_image_descriptions": True,
+            "include_raw_content": False,
             "time_range": time_range,
             "topic": "news",
         }
@@ -612,6 +670,31 @@ class TopicAgent(BaseAgent):
         except Exception as e:
             logger.error(f"[选题Agent] Tavily 搜索异常 [{source_name}]: {e}")
             return []
+
+    def _reserve_tavily_credits(self, cost: int, query: str = "") -> bool:
+        current = self._tavily_budget["credits"]
+        projected = current + cost
+        if projected > self.absolute_max_tavily_credits:
+            self._tavily_budget["hard_stop_triggered"] = True
+            logger.error(
+                f"[选题Agent] Tavily absolute max 触发: {projected}>"
+                f"{self.absolute_max_tavily_credits}，强制终止调用"
+            )
+            return False
+        if projected > self.hard_stop_tavily_credits:
+            self._tavily_budget["hard_stop_triggered"] = True
+            logger.error(
+                f"[选题Agent] Tavily hard stop 触发: {projected}>"
+                f"{self.hard_stop_tavily_credits}，停止追加搜索"
+            )
+            return False
+        if projected > self.max_total_tavily_credits:
+            logger.warning(
+                f"[选题Agent] Tavily 默认credits预算耗尽，跳过: {query[:60]}"
+            )
+            return False
+        self._tavily_budget["credits"] = projected
+        return True
 
     # ==================== 顶流明星过滤 ====================
 

@@ -42,6 +42,9 @@ def test_daily_query_cache_avoids_second_tavily_call(tmp_path):
     agent.freshness_hours = 24
     agent._actual_tavily_calls = 0
     agent._cache_hits = 0
+    agent._tavily_budget = {
+        "credits": 0, "cache_hits": 0, "hard_stop_triggered": False
+    }
     agent._search_cache = {}
     agent._daily_cache_path = tmp_path / "cache.json"
     agent.get_config = lambda key, default=None: {
@@ -94,23 +97,92 @@ def test_daily_query_cache_persists_between_agent_instances(tmp_path):
 
 def test_tiered_search_respects_total_budget():
     agent = object.__new__(TopicAgent)
-    agent.max_tavily_queries = 10
+    agent.max_core_tavily_queries = 6
     agent.freshness_hours = 24
     agent.max_extra_tavily_queries = 4
     agent.min_candidates_before_extra = 3
     agent._actual_tavily_calls = 0
+    agent._core_tavily_calls = 0
+    agent._extra_tavily_calls = 0
     agent._cache_hits = 0
+    agent.max_total_tavily_credits = 12
+    agent._tavily_budget = {"credits": 0, "hard_stop_triggered": False}
     agent.get_config = lambda key, default=None: "test-key"
 
     async def fake_search(query):
         agent._actual_tavily_calls += 1
+        if query["budget_purpose"] == "core":
+            agent._core_tavily_calls += 1
+        else:
+            agent._extra_tavily_calls += 1
         return []
 
     agent._tavily_search = fake_search
     results = asyncio.run(agent._search_korean_entertainment())
 
     assert results == []
-    assert agent._actual_tavily_calls <= agent.max_tavily_queries
+    assert agent._core_tavily_calls <= 6
+    assert agent._extra_tavily_calls <= 4
+    assert agent._actual_tavily_calls <= 10
+
+
+def test_credit_budget_and_hard_stop():
+    agent = object.__new__(TopicAgent)
+    agent.max_total_tavily_credits = 12
+    agent.hard_stop_tavily_credits = 20
+    agent.absolute_max_tavily_credits = 50
+    agent._tavily_budget = {"credits": 0, "hard_stop_triggered": False}
+
+    assert all(agent._reserve_tavily_credits(1) for _ in range(12))
+    assert not agent._reserve_tavily_credits(1)
+    assert agent._tavily_budget["credits"] == 12
+
+    agent.max_total_tavily_credits = 30
+    agent.hard_stop_tavily_credits = 13
+    assert not agent._reserve_tavily_credits(2)
+    assert agent._tavily_budget["hard_stop_triggered"] is True
+
+
+class _ImageSearchResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"images": ["https://example.com/idol.jpg"]}
+
+
+class _ImageSearchHttp:
+    async def post(self, *args, **kwargs):
+        return _ImageSearchResponse()
+
+
+def test_image_fallback_respects_two_query_limit():
+    agent = object.__new__(ImageAgent)
+    agent.get_config = lambda key, default=None: default
+
+    async def get_http():
+        return _ImageSearchHttp()
+
+    agent._get_http = get_http
+    budget = {
+        "credits": 0,
+        "calls": 0,
+        "image_calls": 0,
+        "max_image_calls": 2,
+        "max_total_credits": 12,
+        "hard_stop_credits": 20,
+        "absolute_max_credits": 50,
+        "hard_stop_triggered": False,
+    }
+    context = {"topic_info": {"title": "BTS V update"}, "tavily_budget": budget}
+
+    asyncio.run(agent._tavily_image_fallback(context))
+    asyncio.run(agent._tavily_image_fallback(context))
+    third = asyncio.run(agent._tavily_image_fallback(context))
+
+    assert third == []
+    assert budget["image_calls"] == 2
+    assert budget["credits"] == 2
 
 
 class _FakeWriter:

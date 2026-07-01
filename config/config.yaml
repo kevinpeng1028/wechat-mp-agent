@@ -29,11 +29,13 @@ llm:
 tavily:
   api_key: "${TAVILY_API_KEY}"
   base_url: "https://api.tavily.com"
-  search_depth: "advanced"
+  search_depth: "basic"
+  auto_parameters: false
+  include_answer: false
   max_results: 6
   include_images: true
   include_image_descriptions: true
-  include_raw_content: "markdown"
+  include_raw_content: false
   topic: "news"           # 新闻模式，确保时效性
   time_range: "day"        # 过去24小时：day/week/month/year
 
@@ -130,8 +132,15 @@ topic_agent:
     freshness_hours: 24         # 只选24小时内的素材
     freshness_hours_primary: 24
     freshness_hours_secondary: 72
-    max_tavily_queries: 10       # 单次运行总预算，默认不超过10次
+    search_depth: "basic"
+    auto_parameters: false
+    allow_advanced_search: false
+    max_core_tavily_queries: 6
     max_extra_tavily_queries: 4
+    max_image_search_queries: 2
+    max_total_tavily_credits_per_run: 12
+    hard_stop_tavily_credits_per_run: 20
+    absolute_max_tavily_credits_per_run: 50
     min_candidates_before_extra_search: 3
     use_search_cache: true
     min_images_per_article: 1   # 每篇文章至少需要1张图

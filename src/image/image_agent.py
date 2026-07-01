@@ -204,11 +204,13 @@ class ImageAgent(BaseAgent):
         )
 
         if not filtered_images:
-            return AgentResult(
-                status=AgentStatus.FAILED,
-                agent_name=self.name,
-                error="所有图片被关键词过滤，图片不合格，终止本篇文章",
-            )
+            filtered_images = await self._tavily_image_fallback(context)
+            if not filtered_images:
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    agent_name=self.name,
+                    error="所有图片被过滤且图片搜索预算不足或无结果",
+                )
 
         # Step 2: 限制每篇文章最多3张图片
         max_images = 4
@@ -238,11 +240,27 @@ class ImageAgent(BaseAgent):
                 logger.info(f"[配图Agent] ✅ 下载: {result['filename']} ← {result['source_url'][:80]}")
 
         if not downloaded:
-            return AgentResult(
-                status=AgentStatus.FAILED,
-                agent_name=self.name,
-                error="所有图片下载失败，终止本篇文章",
-            )
+            fallback_images = await self._tavily_image_fallback(context)
+            if fallback_images:
+                fallback_results = await asyncio.gather(*[
+                    self._download_image(
+                        img.get("url", ""),
+                        img,
+                        len(filtered_images) + idx,
+                    )
+                    for idx, img in enumerate(fallback_images)
+                    if img.get("url")
+                ], return_exceptions=True)
+                downloaded = [
+                    result for result in fallback_results
+                    if isinstance(result, dict) and result.get("path")
+                ]
+            if not downloaded:
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    agent_name=self.name,
+                    error="文章图片、og:image、Tavily备用图片均失败",
+                )
 
         # Step 4: LOGO/符号图片内容检测（基于颜色复杂度、边缘密度等）
         valid_downloaded = []
@@ -430,6 +448,86 @@ class ImageAgent(BaseAgent):
         except Exception as exc:
             logger.info(f"[配图Agent] og:image 获取失败，使用 Tavily 图片: {exc}")
         return None
+
+    async def _tavily_image_fallback(self, context: Dict) -> List[Dict]:
+        """仅在已有图片失败后执行，且与选题搜索共享 credits 账本。"""
+        budget = context.get("tavily_budget")
+        if not isinstance(budget, dict):
+            logger.warning("[配图Agent] 缺少共享 Tavily 预算，跳过备用搜图")
+            return []
+        max_image_calls = min(
+            budget.get("max_image_calls", 2),
+            self.get_config("topic_agent.image.max_image_search_queries", 2),
+        )
+        if budget.get("image_calls", 0) >= max_image_calls:
+            logger.warning("[配图Agent] Tavily 图片搜索次数预算已耗尽")
+            return []
+
+        cost = 1  # 图片 fallback 强制 basic
+        projected = budget.get("credits", 0) + cost
+        absolute_max = budget.get("absolute_max_credits", 50)
+        hard_stop = budget.get("hard_stop_credits", 20)
+        default_max = budget.get("max_total_credits", 12)
+        if projected > absolute_max:
+            budget["hard_stop_triggered"] = True
+            logger.error("[配图Agent] Tavily absolute max 触发，强制停止备用搜图")
+            return []
+        if projected > hard_stop:
+            budget["hard_stop_triggered"] = True
+            logger.error("[配图Agent] Tavily hard stop 触发，停止备用搜图")
+            return []
+        if projected > default_max:
+            logger.warning("[配图Agent] Tavily 默认credits预算不足，切换下一篇")
+            return []
+
+        topic = context.get("topic_info", {})
+        title = topic.get("title", "") if isinstance(topic, dict) else ""
+        if not title:
+            return []
+        budget["credits"] = projected
+        budget["calls"] = budget.get("calls", 0) + 1
+        budget["image_calls"] = budget.get("image_calls", 0) + 1
+
+        try:
+            http = await self._get_http()
+            response = await http.post(
+                f"{self.get_config('tavily.base_url', 'https://api.tavily.com')}/search",
+                json={
+                    "query": f"{title} official press photo",
+                    "search_depth": "basic",
+                    "auto_parameters": False,
+                    "include_answer": False,
+                    "include_raw_content": False,
+                    "include_images": True,
+                    "max_results": 1,
+                    "topic": "news",
+                },
+                headers={
+                    "Authorization": f"Bearer {self.get_config('tavily.api_key', '')}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            images = list(data.get("images", []))
+            for result in data.get("results", []):
+                images.extend(result.get("images", []))
+            normalized = []
+            for image in images:
+                item = image if isinstance(image, dict) else {"url": image}
+                if item.get("url") and not _is_blocked_image(
+                    item["url"], item.get("description", "")
+                ):
+                    normalized.append(item)
+            logger.info(
+                f"[配图Agent] Tavily备用搜图调用 "
+                f"{budget['image_calls']}/{max_image_calls} | "
+                f"累计credits={budget['credits']} | 结果={len(normalized)}"
+            )
+            return normalized[:3]
+        except Exception as exc:
+            logger.warning(f"[配图Agent] Tavily备用搜图失败: {exc}")
+            return []
 
     def _categorize_images(self, downloaded: List[Dict]) -> Dict[str, List[Dict]]:
         """

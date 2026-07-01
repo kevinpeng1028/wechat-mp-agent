@@ -169,6 +169,16 @@ class WeChatMPOrchestrator:
             ctx["written_articles"] = written
             ctx["downloaded_images"] = images
             ctx["selected_topics"] = [a.get("topic_info", {}) for a in written]
+            budget = ctx.get("tavily_budget", {})
+            if budget:
+                logger.info(
+                    f"[编排器] Tavily最终成本 | 实际调用={budget.get('calls', 0)} | "
+                    f"预计credits={budget.get('credits', 0)}/"
+                    f"{budget.get('max_total_credits', 12)} | "
+                    f"缓存命中={budget.get('cache_hits', 0)} | "
+                    f"剩余预算={max(0, budget.get('max_total_credits', 12)-budget.get('credits', 0))} | "
+                    f"hard stop={budget.get('hard_stop_triggered', False)}"
+                )
             progress.update(task2, completed=True)
             progress.update(task3, completed=True)
             console.print(
