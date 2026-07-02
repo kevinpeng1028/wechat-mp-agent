@@ -124,6 +124,78 @@ def _is_logo_or_symbol(img_path: str) -> bool:
         return False
 
 
+def _assess_image_quality(
+    img_path: str, thresholds: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """基于尺寸、文件大小、清晰度和信息量判断新闻图片视觉可用性。"""
+    try:
+        from PIL import Image as PILImage
+        import numpy as np
+
+        path = Path(img_path)
+        image = PILImage.open(path).convert("RGB")
+        width, height = image.size
+        file_size = path.stat().st_size
+        gray = np.asarray(image.convert("L").resize((min(width, 800), min(height, 800))))
+        gray = gray.astype(np.float32)
+
+        # 离散 Laplacian 方差：越低通常越模糊/虚化。
+        laplacian = (
+            -4 * gray
+            + np.roll(gray, 1, axis=0)
+            + np.roll(gray, -1, axis=0)
+            + np.roll(gray, 1, axis=1)
+            + np.roll(gray, -1, axis=1)
+        )
+        blur_score = float(np.var(laplacian[1:-1, 1:-1]))
+
+        histogram = np.bincount(gray.astype(np.uint8).ravel(), minlength=256)
+        probabilities = histogram[histogram > 0] / histogram.sum()
+        entropy = float(-(probabilities * np.log2(probabilities)).sum())
+        contrast = float(np.std(gray))
+
+        thresholds = thresholds or {}
+        min_width = thresholds.get("min_width", 480)
+        min_height = thresholds.get("min_height", 320)
+        min_file_size = thresholds.get("min_file_size_kb", 25) * 1024
+        min_blur_score = thresholds.get("min_blur_score", 45)
+
+        reasons = []
+        if width < min_width or height < min_height:
+            reasons.append(f"尺寸过小({width}x{height})")
+        if file_size < min_file_size:
+            reasons.append(f"文件过小({file_size // 1024}KB)")
+        if blur_score < min_blur_score:
+            reasons.append(f"清晰度不足(blur={blur_score:.1f})")
+        if entropy < 3.2 or contrast < 18:
+            reasons.append(
+                f"信息量过低(entropy={entropy:.1f},contrast={contrast:.1f})"
+            )
+
+        score = 100
+        score -= 35 if blur_score < min_blur_score else 0
+        score -= 25 if width < min_width or height < min_height else 0
+        score -= 20 if file_size < min_file_size else 0
+        score -= 25 if entropy < 3.2 or contrast < 18 else 0
+        return {
+            "passed": not reasons,
+            "quality_score": max(0, score),
+            "blur_score": round(blur_score, 1),
+            "entropy": round(entropy, 2),
+            "contrast": round(contrast, 1),
+            "width": width,
+            "height": height,
+            "file_size": file_size,
+            "reason": "；".join(reasons),
+        }
+    except Exception as exc:
+        return {
+            "passed": False,
+            "quality_score": 0,
+            "reason": f"质量检测异常: {exc}",
+        }
+
+
 class ImageAgent(BaseAgent):
     """
     配图 Agent 职责：
@@ -264,6 +336,7 @@ class ImageAgent(BaseAgent):
 
         # Step 4: LOGO/符号图片内容检测（基于颜色复杂度、边缘密度等）
         valid_downloaded = []
+        quality_rejected = []
         for img in downloaded:
             if _is_logo_or_symbol(img["path"]):
                 logger.info(f"[配图Agent] 🚫 跳过LOGO/符号图片: {img['filename']}")
@@ -272,20 +345,87 @@ class ImageAgent(BaseAgent):
                     Path(img["path"]).unlink(missing_ok=True)
                 except Exception:
                     pass
-            else:
-                valid_downloaded.append(img)
+                quality_rejected.append({**img, "quality_reason": "疑似LOGO/符号"})
+                continue
+
+            quality = _assess_image_quality(
+                img["path"],
+                self.get_config("topic_agent.image", {}),
+            )
+            relevance = self._assess_image_relevance(topic_info, img)
+            img.update({
+                "quality_passed": quality["passed"],
+                "quality_score": quality.get("quality_score", 0),
+                "blur_score": quality.get("blur_score", 0),
+                "quality_reason": quality.get("reason", ""),
+                "relevance_passed": relevance["passed"],
+                "relevance_reason": relevance.get("reason", ""),
+            })
+            if not quality["passed"] or not relevance["passed"]:
+                quality_rejected.append(img)
+                logger.info(
+                    f"[配图Agent] 🚫 视觉质量不合格: {img['filename']} | "
+                    f"{quality['reason'] or relevance.get('reason', '')}"
+                )
+                try:
+                    Path(img["path"]).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                continue
+            valid_downloaded.append(img)
 
         logger.info(
             f"[配图Agent] 内容检测: {len(downloaded)} → {len(valid_downloaded)} 张 "
-            f"(排除 {len(downloaded) - len(valid_downloaded)} 张LOGO/符号)"
+            f"(排除 {len(downloaded) - len(valid_downloaded)} 张低质/无效图)"
         )
 
         if not valid_downloaded:
             return AgentResult(
-                status=AgentStatus.PARTIAL,
+                status=AgentStatus.FAILED,
                 agent_name=self.name,
-                output={"images": [], "message": "所有图片被LOGO/符号检测过滤"},
+                error="所有下载图片均未通过视觉质量检查",
             )
+
+        if len(quality_rejected) > len(downloaded) / 2:
+            return AgentResult(
+                status=AgentStatus.FAILED,
+                agent_name=self.name,
+                error=(
+                    f"超过一半图片质量不合格 "
+                    f"({len(quality_rejected)}/{len(downloaded)})"
+                ),
+            )
+
+        min_required = self.get_config(
+            "topic_agent.image.min_images_required", 2
+        )
+        quality_warning = None
+        if len(valid_downloaded) < min_required:
+            # 仅允许一张非常高质量的新闻图作为例外，绝不以低质图凑数。
+            if (
+                len(valid_downloaded) == 1
+                and valid_downloaded[0].get("quality_score", 0) >= 90
+            ):
+                quality_warning = "仅1张高质量图片，按例外保留"
+                logger.warning(f"[配图Agent] ⚠️ {quality_warning}")
+            else:
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    agent_name=self.name,
+                    error=(
+                        f"有效图片不足: {len(valid_downloaded)} < {min_required}"
+                    ),
+                )
+
+        # 质量最高且最清晰的图片优先作为封面。
+        valid_downloaded.sort(
+            key=lambda item: (
+                item.get("quality_score", 0),
+                item.get("blur_score", 0),
+                item.get("file_size", 0),
+            ),
+            reverse=True,
+        )
 
         # Step 5: 分类（第一张作为封面，其余作为文中插图）
         categorized = self._categorize_images(valid_downloaded)
@@ -318,8 +458,48 @@ class ImageAgent(BaseAgent):
                 "footer_images": categorized["footer"],
                 "total_count": len(all_images),
                 "image_dir": str(self.image_dir),
+                "quality_warning": quality_warning,
+                "rejected_image_count": len(quality_rejected),
             },
         )
+
+    @staticmethod
+    def _assess_image_relevance(topic_info: Dict, image: Dict) -> Dict[str, Any]:
+        """有明确人物元数据时，拒绝与文章艺人明显不一致的图片。"""
+        try:
+            from src.topic.scoring import ScoringSystem
+
+            article_text = " ".join([
+                str(topic_info.get("title", "")),
+                str(topic_info.get("summary", "")),
+                str(topic_info.get("url", "")),
+            ])
+            image_text = " ".join([
+                str(image.get("description", "")),
+                str(image.get("article_title", "")),
+                str(image.get("article_source", "")),
+                str(image.get("source_url", "")),
+            ])
+            article_hits = {
+                star for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, article_text)
+            }
+            image_hits = {
+                star for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, image_text)
+            }
+            if article_hits and image_hits and not article_hits.intersection(image_hits):
+                return {
+                    "passed": False,
+                    "reason": (
+                        f"图片人物与文章不一致: "
+                        f"{sorted(article_hits)[:2]} vs {sorted(image_hits)[:2]}"
+                    ),
+                }
+            return {"passed": True, "reason": ""}
+        except Exception as exc:
+            logger.warning(f"[配图Agent] 图片相关性检测异常，保守继续: {exc}")
+            return {"passed": True, "reason": ""}
 
     async def _download_image(self, url: str, img_info: Dict, idx: int) -> Optional[Dict]:
         """下载单张图片到本地（统一转换为标准JPEG，确保微信兼容）"""

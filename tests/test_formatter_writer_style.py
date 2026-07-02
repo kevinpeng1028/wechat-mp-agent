@@ -66,5 +66,7 @@ def test_writer_prompt_uses_mobile_kpop_newsletter_style_without_ai_news_tone():
     assert "多用短句" in system_prompt
     assert "不模仿或复制任何具体账号" in system_prompt
     assert "轻快自然的韩娱快讯" in prompt
+    assert "目标约400字" in prompt
+    assert "理想350-500字" in prompt
     assert "未确认的服装、动作、表情" in prompt
     assert "引发广泛关注" in prompt  # 明确列为禁用新闻稿腔

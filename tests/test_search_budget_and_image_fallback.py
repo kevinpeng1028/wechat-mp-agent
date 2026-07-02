@@ -270,3 +270,24 @@ def test_all_image_failures_return_no_articles():
 
     assert written == []
     assert images == []
+
+
+def test_two_image_failures_continue_to_third_candidate():
+    WeChatMPOrchestrator = _orchestrator_class()
+    orchestrator = object.__new__(WeChatMPOrchestrator)
+    orchestrator.writer = _FakeWriter()
+    orchestrator.image_agent = _FakeImage(successful_title="third")
+    candidates = [
+        {"title": "first"}, {"title": "second"}, {"title": "third"},
+    ]
+
+    written, images, _ = asyncio.run(
+        orchestrator._write_with_image_fallback(
+            {}, candidates, max_attempts=3, target_count=1
+        )
+    )
+
+    assert [article["title"] for article in written] == ["third"]
+    assert images
+    assert candidates[0]["image_failed"] is True
+    assert candidates[1]["image_failed"] is True

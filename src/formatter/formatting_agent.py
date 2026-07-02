@@ -36,7 +36,7 @@ class FormattingAgent(BaseAgent):
         super().__init__(config)
         self.template_mgr = TemplateManager(config or {})
         self.consistency_checker = ImageConsistencyChecker(config or {})
-        self.paragraph_rules = (config or {}).get(
+        self.paragraph_rules = self.get_config(
             "formatter_agent.paragraph_split", {}
         )
 

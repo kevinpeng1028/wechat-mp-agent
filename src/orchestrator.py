@@ -264,13 +264,14 @@ class WeChatMPOrchestrator:
         """准备排版Agent所需的数据格式"""
         # 获取已下载的图片（含本地 path），建立 url → path 映射
         downloaded = ctx.get("downloaded_images", [])
-        url_to_path = {}
+        url_to_download = {}
         for img in downloaded:
             if isinstance(img, dict):
-                url = img.get("url", "")
+                url = img.get("url") or img.get("source_url", "")
                 path = img.get("path", "")
                 if url and path:
-                    url_to_path[url] = path
+                    img["url"] = url
+                    url_to_download[url] = img
 
         formatted = []
         for article in written_articles:
@@ -281,8 +282,9 @@ class WeChatMPOrchestrator:
             for img in tavily_images:
                 if isinstance(img, dict) and not img.get("path"):
                     img_url = img.get("url", "")
-                    if img_url in url_to_path:
-                        img["path"] = url_to_path[img_url]
+                    if img_url in url_to_download:
+                        # 传递视觉质量指标，供排版前一致性检查再次验收。
+                        img.update(url_to_download[img_url])
             formatted.append({
                 "is_success": True,
                 "title": article.get("title", ""),

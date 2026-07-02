@@ -143,14 +143,19 @@ topic_agent:
     absolute_max_tavily_credits_per_run: 50
     min_candidates_before_extra_search: 3
     use_search_cache: true
-    min_images_per_article: 1   # 每篇文章至少需要1张图
+    min_images_per_article: 2   # 默认至少2张强相关真实图片
     max_images_per_article: 4   # 每篇文章最多4张图，必须强相关
 
   image:
     max_article_image_attempts: 5
-    max_image_search_queries: 3
+    max_image_search_queries: 2
     require_valid_image: true
-    min_images_required: 1
+    min_images_required: 2
+    allow_single_high_quality_image: true
+    min_width: 480
+    min_height: 320
+    min_file_size_kb: 25
+    min_blur_score: 45
 
   # 综合评分权重（15个评分字段）
   scoring:
@@ -175,7 +180,9 @@ writer_agent:
   styles:
     idol_observation:
       tone: "轻快自然的中文韩娱快讯，有观察感但不饭圈化"
-      length_range: [200, 800]       # 200-800字
+      target_length: 400
+      ideal_length_range: [350, 500]
+      length_range: [200, 800]
       structure: ["一句话点题", "公开信息与看点", "讨论焦点", "轻收束"]
 
   # 禁止编造规则
@@ -215,6 +222,18 @@ writer_agent:
     - "展现出强大的国际影响力"
     - "从行业角度来看"
     - "文化输出"
+    - "被指与女友调情"
+    - "真实颜值"
+    - "隐藏颜值"
+    - "借题发挥"
+    - "具体细节我们不再展开"
+    - "恋情实锤"
+    - "暧昧"
+    - "翻车"
+    - "疑似塌房"
+    - "网友怒批"
+    - "调情"
+    - "女友"
 
   # 允许的安全表达
   safe_expressions:

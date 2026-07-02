@@ -46,8 +46,8 @@ class WritingAgent(BaseAgent):
     def _init_llm(self):
         from openai import AsyncOpenAI
         return AsyncOpenAI(
-            api_key=self.config.get("llm.api_key"),
-            base_url=self.config.get("llm.base_url"),
+            api_key=self.get_config("llm.api_key"),
+            base_url=self.get_config("llm.base_url"),
         )
 
     async def _get_http(self):
@@ -138,7 +138,7 @@ class WritingAgent(BaseAgent):
         # 调用 LLM
         try:
             response = await self.llm_client.chat.completions.create(
-                model=self.config.get("llm.model", "deepseek-v4-flash"),
+                model=self.get_config("llm.model", "deepseek-v4-flash"),
                 messages=[
                     {
                         "role": "system",
@@ -146,8 +146,8 @@ class WritingAgent(BaseAgent):
                     },
                     {"role": "user", "content": prompt},
                 ],
-                temperature=self.config.get("llm.temperature.writing", 0.7),
-                max_tokens=self.config.get("llm.max_tokens", 4096),
+                temperature=self.get_config("llm.temperature.writing", 0.7),
+                max_tokens=self.get_config("llm.max_tokens", 4096),
             )
 
             content = response.choices[0].message.content.strip()
@@ -227,13 +227,15 @@ class WritingAgent(BaseAgent):
 6. 禁止输出 hashtag、emoji、硬性互动CTA
 7. 只输出正文，不要重复标题
 8. 不要输出 Markdown 标题符号 #
-9. 正文 200-800字
+9. 正文目标约400字，理想范围350-500字，硬范围200-800字；不要用空话凑字数
 10. 多用短句和自然分段，每段约25-80字，适合手机阅读
 11. 先用一句话点明“谁、发生了什么”，再写公开可确认的看点和讨论点
 12. 语气像中文韩娱快讯：轻快、有一点粉丝视角，但克制、不尖叫、不造谣
 13. 避免正式新闻稿和AI总结腔：不用“据悉、此外、值得注意的是、引发广泛关注、具有重要意义、展现国际影响力、从行业角度来看、文化输出”
 14. 标题把艺人名放前面，信息点明确、简短自然，不要机器翻译感和夸张标题党
 15. 涉及恋情、争议、法律回应时只复述来源已公开事实，不扩写私人细节，不把猜测写成事实
+15.1 禁止“被指与女友调情、真实颜值、隐藏颜值、借题发挥、具体细节我们不再展开、恋情实锤、暧昧、翻车、疑似塌房、网友怒批”等刺激或暗示性表达
+15.2 改用“相关片段引发讨论、网友看法不一、粉丝呼吁别过度解读、评论区观点不一”等中性表述
 16. 结尾轻轻收束，可自然提到后续动态或留下一个克制的问题，不上价值
 17. 韩国人名统一用中文译名（如"宋智孝""苏志燮"），团体名可用国际通用名
 
@@ -250,9 +252,9 @@ class WritingAgent(BaseAgent):
         image_info = self._build_image_info(tavily_images)
 
         # 获取写作规则
-        banned = self.config.get("writer_agent.banned_phrases", [])
-        safe = self.config.get("writer_agent.safe_expressions", [])
-        rules = self.config.get("writer_agent.format_rules", {})
+        banned = self.get_config("writer_agent.banned_phrases", [])
+        safe = self.get_config("writer_agent.safe_expressions", [])
+        rules = self.get_config("writer_agent.format_rules", {})
 
         prompt = f"""请为以下选题撰写一篇中文韩娱资讯公众号短文。
 
@@ -271,13 +273,13 @@ class WritingAgent(BaseAgent):
 
 ## 写作要求
 1. **语言**: 全文简体中文，韩语/英语源文必须翻译，韩国人名用中文译名
-2. **字数**: 200-800字（含标点）
+2. **字数**: 目标约400字，理想350-500字，允许200-800字；少于200字必须补写，超过800字必须压缩，不写空话
 3. **文风**: 轻快自然的韩娱快讯。少正式新闻腔，先说谁发生了什么，再写公开看点和讨论
 4. **段落**: 多用短句，每段25-80字，手机阅读时不要出现长句堆叠
 5. **禁止口吻**: {', '.join(banned[:8])} 等饭圈表达
 6. **安全表达**: 可用 {', '.join(safe[:5])}
 7. **格式**: {"不输出Markdown标题符号" if rules.get("no_markdown_headings") else ""} {"不输出hashtag" if rules.get("no_hashtags") else ""}
-8. **事实边界**: 粉丝/网友反应只能使用源材料明确提供的内容；争议与传闻不扩写、不定性
+8. **事实边界**: 粉丝/网友反应只能使用源材料明确提供的内容；争议与传闻不扩写、不定性；不用“女友、调情、真实颜值、隐藏颜值、借题发挥、恋情实锤、暧昧、翻车、疑似塌房、网友怒批”
 9. **图片边界**: 未确认的服装、动作、表情、背景、构图一律不写，可用“从公开内容来看”“相关物料公开后”
 10. **标题**: 艺人名放前面，信息点明确、自然简短，不要机器翻译腔
 11. **禁用新闻稿腔**: 据悉、此外、值得注意的是、引发广泛关注、具有重要意义、展现国际影响力、从行业角度来看
@@ -288,7 +290,7 @@ class WritingAgent(BaseAgent):
 {{
   "title": "文章标题（简体中文，不含饭圈词汇）",
   "summary": "摘要（简体中文，≤120字）",
-  "content_text": "纯文本正文（简体中文，200-800字）",
+  "content_text": "纯文本正文（简体中文，目标约400字，理想350-500字，硬范围200-800字）",
   "content_html": "HTML正文（含<img>标签占位，用{{IMAGE_N}}替换实际图片位置）"
 }}
 ```
@@ -382,7 +384,7 @@ class WritingAgent(BaseAgent):
             issues.append(f"字数超标({char_count} > 800)")
 
         # 检查禁止口吻
-        banned = self.config.get("writer_agent.banned_phrases", [])
+        banned = self.get_config("writer_agent.banned_phrases", [])
         for phrase in banned:
             if phrase in content or phrase in title:
                 issues.append(f"含禁止口吻: '{phrase}'")
@@ -436,10 +438,11 @@ class WritingAgent(BaseAgent):
 请重新生成，特别注意:
 1. 所有内容必须是简体中文，韩语/英语必须完全翻译
 2. 绝对不要出现上述问题
-3. 字数控制在200-800字
+3. 目标约400字，优先控制在350-500字；少于200字必须补写，超过800字必须压缩
 4. 不要写任何具体图片画面细节
 5. 不要使用饭圈口吻
 6. 韩国人名用中文译名
+7. 争议内容使用中性表达，不写女友、调情、真实颜值、借题发挥、恋情实锤、暧昧、翻车或疑似塌房
 
 选题: {topic.get("title", "")}
 源文章参考: {self._build_source_material(source_articles)[:500]}
@@ -448,13 +451,13 @@ class WritingAgent(BaseAgent):
 
         try:
             response = await self.llm_client.chat.completions.create(
-                model=self.config.get("llm.model", "deepseek-v4-flash"),
+                model=self.get_config("llm.model", "deepseek-v4-flash"),
                 messages=[
                     {"role": "system", "content": self._get_system_prompt()},
                     {"role": "user", "content": stricter_prompt},
                 ],
                 temperature=0.5,  # 降低温度
-                max_tokens=self.config.get("llm.max_tokens", 4096),
+                max_tokens=self.get_config("llm.max_tokens", 4096),
             )
 
             content = response.choices[0].message.content.strip()
