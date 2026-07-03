@@ -110,6 +110,14 @@ topic_agent:
     hard_stop_tavily_credits_per_run: 20
     absolute_max_tavily_credits_per_run: 50
     min_candidates_before_extra_search: 3
+    # 分层搜索候选池目标：不足时自动进入下一 phase，不降低质量门槛
+    raw_candidate_target: 6
+    raw_candidate_max: 12
+    min_raw_before_supplement: 3
+    quality_candidate_target: 3
+    quality_candidate_max: 5
+    min_quality_before_supplement: 2
+    ready_candidate_target: 1
     use_search_cache: true
     min_images_per_article: 2   # 默认至少2张强相关真实图片
     max_images_per_article: 4   # 每篇文章最多4张图，必须强相关

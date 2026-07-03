@@ -204,6 +204,16 @@ class TopicAgent(BaseAgent):
         self.min_candidates_before_extra = search_cfg.get(
             "min_candidates_before_extra_search", 3
         )
+        self.raw_candidate_target = search_cfg.get("raw_candidate_target", 6)
+        self.min_raw_before_supplement = search_cfg.get(
+            "min_raw_before_supplement", 3
+        )
+        self.quality_candidate_target = search_cfg.get(
+            "quality_candidate_target", 3
+        )
+        self.min_quality_before_supplement = search_cfg.get(
+            "min_quality_before_supplement", 2
+        )
         self._actual_tavily_calls = 0
         self._cache_hits = 0
         self._core_tavily_calls = 0
@@ -219,6 +229,8 @@ class TopicAgent(BaseAgent):
             "absolute_max_credits": self.absolute_max_tavily_credits,
             "hard_stop_triggered": False,
         }
+        self._seen_search_urls = set()
+        self._phase4_queries: List[Dict] = []
         # 进程内缓存 + 同日磁盘缓存
         self._search_cache: Dict[str, Tuple[float, List[Dict]]] = {}
         project_root = Path((config or {}).get("project_root", "."))
@@ -324,19 +336,7 @@ class TopicAgent(BaseAgent):
             )
 
         # Step 3: 综合评分（15个字段）
-        scored = []
-        for article in fresh_candidates:
-            tavily_imgs = article.get("_tavily_images", [])
-
-            # 并行评分
-            score_result = await self.scoring.score_article(
-                article, tavily_imgs, self.llm_client
-            )
-
-            scored.append({
-                **article,
-                "scores": score_result,
-            })
+        scored = await self._score_candidates(fresh_candidates)
 
         # Step 4: 排序选优
         scored_sorted = sorted(
@@ -358,6 +358,34 @@ class TopicAgent(BaseAgent):
                 logger.info(
                     f"[选题Agent] ❌ 不满足ready: {article.get('title','?')[:40]} | {reason}"
                 )
+
+        # 唯一候选重复或所有候选均未 ready 时，不立即失败。使用预留的
+        # Phase 4 预算补搜，并将新候选走完相同的严格过滤和评分流程。
+        if not ready_articles and self._phase4_queries:
+            for article in scored_sorted:
+                duplicate = article.get("scores", {}).get(
+                    "duplicate_check_result", {}
+                )
+                if not duplicate.get("is_duplicate"):
+                    continue
+                logger.info(
+                    f"[选题Agent] 重复候选触发补搜 | URL={article.get('url', '')} | "
+                    f"原因={duplicate.get('duplicate_source', '历史重复')} | "
+                    "进入 Phase 4=True"
+                )
+            logger.info(
+                "[选题Agent] ready=0 且仍有补搜策略/预算，进入 Phase 4"
+            )
+            extra_candidates = await self._search_phase4_supplemental()
+            prepared_extra = self._prepare_candidates(extra_candidates)
+            extra_scored = await self._score_candidates(prepared_extra)
+            scored.extend(extra_scored)
+            scored_sorted = self._sort_scored(scored)
+            ready_articles = self._collect_ready(scored_sorted)
+            self._log_phase_metrics(
+                "Phase 4 supplemental", extra_candidates,
+                ready_count=len(ready_articles), enter_next=False,
+            )
 
         if not ready_articles:
             return AgentResult(
@@ -397,6 +425,47 @@ class TopicAgent(BaseAgent):
             },
         )
 
+    async def _score_candidates(self, candidates: List[Dict]) -> List[Dict]:
+        scored = []
+        for article in candidates:
+            score_result = await self.scoring.score_article(
+                article, article.get("_tavily_images", []), self.llm_client
+            )
+            scored.append({**article, "scores": score_result})
+        return scored
+
+    @staticmethod
+    def _sort_scored(scored: List[Dict]) -> List[Dict]:
+        return sorted(
+            scored,
+            key=lambda item: (
+                item.get("_source_priority", 0),
+                item.get("scores", {}).get("total_score", 0),
+            ),
+            reverse=True,
+        )
+
+    def _collect_ready(self, scored: List[Dict]) -> List[Dict]:
+        ready = []
+        for article in scored:
+            is_ready, reason = self.scoring.is_ready_for_draft(
+                article.get("scores", {})
+            )
+            if is_ready:
+                ready.append(article)
+            else:
+                logger.info(
+                    f"[选题Agent] ❌ 不满足ready: "
+                    f"{article.get('title', '?')[:40]} | {reason}"
+                )
+        return ready
+
+    def _prepare_candidates(self, candidates: List[Dict]) -> List[Dict]:
+        with_images = [item for item in candidates if item.get("_tavily_images")]
+        fresh = self._filter_freshness(with_images)
+        idol = self._filter_idol_centric_topics(fresh)
+        return self._filter_top_stars(idol)
+
     # ==================== Tavily 搜索 ====================
 
     async def _search_korean_entertainment(self) -> List[Dict]:
@@ -414,51 +483,51 @@ class TopicAgent(BaseAgent):
             return []
 
         all_results = []
-        seen_urls = set()
+        self._seen_search_urls = set()
         tiers = self._build_tiered_search_queries()
+        self._phase4_queries = tiers["phase4"]
 
-        async def run_queries(queries: List[Dict], purpose: str, limit: int):
-            used = (
-                self._core_tavily_calls if purpose == "core"
-                else self._extra_tavily_calls
-            )
-            remaining = max(0, limit - used)
-            for i in range(0, min(len(queries), remaining), 3):
-                batch = queries[i:i + min(3, remaining - i)]
-                for query in batch:
-                    query["budget_purpose"] = purpose
-                results = await asyncio.gather(
-                    *(self._tavily_search(query) for query in batch)
-                )
-                for query_result in results:
-                    for article in query_result or []:
-                        url = article.get("url", "")
-                        if url and url not in seen_urls:
-                            seen_urls.add(url)
-                            all_results.append(article)
-
-        await run_queries(
-            tiers["primary"], "core", self.max_core_tavily_queries
+        # Phase 1: 少量韩媒精准搜索，先观察产出，不一次烧完 core 预算。
+        all_results.extend(await self._run_search_phase(
+            tiers["primary"][:3], "core", 3
+        ))
+        metrics = self._candidate_metrics(all_results)
+        need_more = (
+            metrics["raw"] < getattr(self, "min_raw_before_supplement", 3)
+            or metrics["quality"]
+            < getattr(self, "min_quality_before_supplement", 2)
         )
-        eligible = len([
-            article for article in self._filter_idol_centric_topics(all_results)
-            if article.get("_tavily_images")
-        ])
-        if eligible < self.min_candidates_before_extra:
-            # 先用最多2次预算补充更多韩国本土媒体。
-            await run_queries(
-                tiers["secondary"], "extra",
-                min(2, self.max_extra_tavily_queries)
-            )
-            eligible = len([
-                article for article in self._filter_idol_centric_topics(all_results)
-                if article.get("_tavily_images")
-            ])
-        if eligible < self.min_candidates_before_extra:
-            # 韩媒仍不足时才使用英文韩娱站，且共享剩余追加预算。
-            await run_queries(
-                tiers["supplemental"], "extra", self.max_extra_tavily_queries
-            )
+        self._log_phase_metrics("Phase 1 韩媒精准", all_results, 0, need_more)
+
+        # Phase 2: 用主题型韩文 query 扩大韩媒覆盖，不再固定堆砌艺人名。
+        if need_more:
+            all_results.extend(await self._run_search_phase(
+                tiers["secondary"], "core", self.max_core_tavily_queries
+            ))
+        metrics = self._candidate_metrics(all_results)
+        need_english = (
+            metrics["raw"] < getattr(self, "raw_candidate_target", 6)
+            or metrics["quality"]
+            < getattr(self, "quality_candidate_target", 3)
+        )
+        self._log_phase_metrics(
+            "Phase 2 韩媒宽泛", all_results, 0, need_english
+        )
+
+        # Phase 3: 韩媒池仍不足才启用英文韩娱站，最多先用 2 次 extra，
+        # 保留另外 2 次给“唯一候选重复/ready=0”的 Phase 4。
+        if need_english:
+            all_results.extend(await self._run_search_phase(
+                tiers["supplemental"], "extra",
+                min(2, self.max_extra_tavily_queries),
+            ))
+        metrics = self._candidate_metrics(all_results)
+        self._log_phase_metrics(
+            "Phase 3 英文韩娱 fallback", all_results, 0,
+            metrics["raw"] < getattr(self, "min_raw_before_supplement", 3)
+            or metrics["quality"]
+            < getattr(self, "min_quality_before_supplement", 2),
+        )
 
         logger.info(
             f"[选题Agent] Tavily搜索完成: {len(all_results)} 篇独特文章 | "
@@ -471,23 +540,73 @@ class TopicAgent(BaseAgent):
         )
         return all_results
 
+    async def _run_search_phase(
+        self, queries: List[Dict], purpose: str, call_limit: int
+    ) -> List[Dict]:
+        used = (
+            self._core_tavily_calls if purpose == "core"
+            else self._extra_tavily_calls
+        )
+        remaining = max(0, call_limit - used)
+        results_out = []
+        for query in queries[:remaining]:
+            query = dict(query)
+            query["budget_purpose"] = purpose
+            logger.info(
+                f"[选题Agent] 补搜 source={query.get('source_name')} | "
+                f"query={query.get('query')}"
+            )
+            for article in await self._tavily_search(query) or []:
+                url = article.get("url", "")
+                if url and url not in self._seen_search_urls:
+                    self._seen_search_urls.add(url)
+                    results_out.append(article)
+        return results_out
+
+    async def _search_phase4_supplemental(self) -> List[Dict]:
+        return await self._run_search_phase(
+            self._phase4_queries, "extra", self.max_extra_tavily_queries
+        )
+
+    def _candidate_metrics(self, candidates: List[Dict]) -> Dict[str, int]:
+        with_images = [
+            article for article in candidates if article.get("_tavily_images")
+        ]
+        idol = self._filter_idol_centric_topics(with_images)
+        non_duplicate = [
+            article for article in idol
+            if not self.scoring._check_duplicate(article).get("is_duplicate")
+        ]
+        return {
+            "raw": len(candidates),
+            "images": len(with_images),
+            "idol": len(idol),
+            "duplicates": len(idol) - len(non_duplicate),
+            "quality": len(non_duplicate),
+        }
+
+    def _log_phase_metrics(
+        self, phase: str, candidates: List[Dict], ready_count: int,
+        enter_next: bool,
+    ):
+        metrics = self._candidate_metrics(candidates)
+        logger.info(
+            f"[选题Agent] {phase} | raw={metrics['raw']} | "
+            f"after_image={metrics['images']} | after_idol={metrics['idol']} | "
+            f"after_duplicate={metrics['quality']} | ready={ready_count} | "
+            f"进入下一 phase={enter_next}"
+        )
+
     def _build_tiered_search_queries(self) -> Dict[str, List[Dict]]:
         primary = [
-            ("entertain.naver.com", "Naver Entertainment", "BTS BLACKPINK aespa IVE 컴백 공항 패션"),
-            ("osen.co.kr", "OSEN", "BTS aespa IVE BLACKPINK 컴백 신곡 콘서트"),
-            ("newsen.com", "NewsEn", "BTS BLACKPINK aespa IVE 공항 브랜드 행사"),
-            ("starnewskorea.com", "StarNews", "BTS BLACKPINK NewJeans aespa 컴백 무대"),
-            ("xportsnews.com", "XportsNews", "Stray Kids SEVENTEEN TXT ENHYPEN 컴백 콘서트"),
-            ("mydaily.co.kr", "MyDaily", "TWICE ITZY NMIXX RIIZE 공항 패션 신곡"),
+            ("entertain.naver.com", "Naver Entertainment", "아이돌 컴백 신곡 티저"),
+            ("osen.co.kr", "OSEN", "걸그룹 MV 컴백"),
+            ("newsen.com", "NewsEn", "보이그룹 공항 패션 브랜드 행사"),
         ]
         secondary = [
-            ("dispatch.co.kr", "Dispatch", "BTS BLACKPINK aespa IVE"),
-            ("tenasia.hankyung.com", "TenAsia", "BTS BLACKPINK aespa IVE"),
-            ("sports.chosun.com", "Sports Chosun", "BTS BLACKPINK aespa IVE"),
-            ("tvreport.co.kr", "TVReport", "BTS BLACKPINK aespa IVE"),
-            ("mk.co.kr", "MK Sports Star Today", "BTS BLACKPINK aespa IVE"),
-            ("heraldpop.com", "Herald POP", "BTS BLACKPINK aespa IVE"),
-            ("imbc.com", "iMBC Entertainment", "BTS BLACKPINK aespa IVE"),
+            ("starnewskorea.com", "StarNews", "아이돌 콘서트 월드투어"),
+            ("xportsnews.com", "XportsNews", "보이그룹 라이브 논란"),
+            ("mydaily.co.kr", "MyDaily", "걸그룹 화보 공항 출국"),
         ]
         supplemental = [
             ("koreaboo.com", "Koreaboo", "BTS BLACKPINK aespa IVE fans react goes viral airport fashion week brand event"),
@@ -497,6 +616,12 @@ class TopicAgent(BaseAgent):
             ("kpopstarz.com", "KpopStarz", "BTS V Suga Jennie Lisa Karina Wonyoung fashion week airport"),
             ("nme.com", "NME K-pop", "k-pop BTS BLACKPINK aespa IVE latest"),
             ("billboard.com", "Billboard K-pop", "k-pop BTS BLACKPINK Stray Kids NewJeans chart"),
+        ]
+        phase4 = [
+            ("tenasia.hankyung.com", "TenAsia", "아이돌 신곡 컴백 공항 패션"),
+            ("dispatch.co.kr", "Dispatch", "아이돌 화보 브랜드 행사"),
+            ("sbsstar.net", "SBS Star", "K-pop idol latest comeback fashion"),
+            ("nme.com", "NME K-pop", "K-pop new song tour interview"),
         ]
         primary_hours = self.get_config(
             "topic_agent.search.freshness_hours_primary", 24
@@ -516,6 +641,10 @@ class TopicAgent(BaseAgent):
             "primary": pack(primary, primary_hours, "ko"),
             "secondary": pack(secondary, secondary_hours, "ko"),
             "supplemental": pack(supplemental, secondary_hours, "en"),
+            "phase4": (
+                pack(phase4[:2], secondary_hours, "ko")
+                + pack(phase4[2:], secondary_hours, "en")
+            ),
         }
 
     def _load_daily_search_cache(self):

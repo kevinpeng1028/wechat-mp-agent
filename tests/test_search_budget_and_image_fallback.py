@@ -107,6 +107,11 @@ def test_tiered_search_respects_total_budget():
     agent._cache_hits = 0
     agent.max_total_tavily_credits = 12
     agent._tavily_budget = {"credits": 0, "hard_stop_triggered": False}
+    agent._seen_search_urls = set()
+    agent.scoring = types.SimpleNamespace(
+        _check_duplicate=lambda article: {"is_duplicate": False}
+    )
+    agent._filter_idol_centric_topics = lambda articles: articles
     agent.get_config = lambda key, default=None: "test-key"
 
     async def fake_search(query):
@@ -124,6 +129,9 @@ def test_tiered_search_respects_total_budget():
     assert agent._core_tavily_calls <= 6
     assert agent._extra_tavily_calls <= 4
     assert agent._actual_tavily_calls <= 10
+    assert agent._core_tavily_calls == 6
+    # Phase 4 is intentionally reserved until ready candidates are known.
+    assert agent._extra_tavily_calls == 2
 
 
 def test_supplemental_queries_are_site_restricted():
@@ -147,7 +155,7 @@ def test_search_tiers_put_korean_media_before_english_sites():
     agent.get_config = lambda key, default=None: default
     tiers = agent._build_tiered_search_queries()
 
-    assert len(tiers["primary"]) == 6
+    assert len(tiers["primary"]) == 3
     assert all(query["source_language"] == "ko" for query in tiers["primary"])
     assert all(
         query["site"] in {
@@ -160,6 +168,104 @@ def test_search_tiers_put_korean_media_before_english_sites():
         query["source_language"] == "en"
         for query in tiers["supplemental"]
     )
+
+
+def test_search_phases_expand_when_raw_and_quality_are_low():
+    agent = object.__new__(TopicAgent)
+    agent.max_core_tavily_queries = 6
+    agent.max_extra_tavily_queries = 4
+    agent.max_total_tavily_credits = 12
+    agent.min_candidates_before_extra = 3
+    agent.freshness_hours = 24
+    agent._actual_tavily_calls = 0
+    agent._core_tavily_calls = 0
+    agent._extra_tavily_calls = 0
+    agent._cache_hits = 0
+    agent._tavily_budget = {"credits": 0, "hard_stop_triggered": False}
+    agent._seen_search_urls = set()
+    agent.scoring = types.SimpleNamespace(
+        _check_duplicate=lambda article: {"is_duplicate": False}
+    )
+    agent._filter_idol_centric_topics = lambda articles: articles
+    agent.get_config = lambda key, default=None: "test-key"
+    called_sources = []
+
+    async def fake_search(query):
+        called_sources.append(query["source_name"])
+        if query["budget_purpose"] == "core":
+            agent._core_tavily_calls += 1
+        else:
+            agent._extra_tavily_calls += 1
+        return []
+
+    agent._tavily_search = fake_search
+    asyncio.run(agent._search_korean_entertainment())
+
+    assert called_sources[:3] == [
+        "Naver Entertainment", "OSEN", "NewsEn"
+    ]
+    assert called_sources[3:6] == [
+        "StarNews", "XportsNews", "MyDaily"
+    ]
+    assert called_sources[6:8] == ["Koreaboo", "AllKpop"]
+
+
+def test_phase4_uses_reserved_extra_budget_after_duplicate_ready_failure():
+    agent = object.__new__(TopicAgent)
+    agent.max_extra_tavily_queries = 4
+    agent._extra_tavily_calls = 2
+    agent._seen_search_urls = set()
+    agent._phase4_queries = [
+        {"query": "site:tenasia.hankyung.com 아이돌 컴백",
+         "site": "tenasia.hankyung.com", "source_name": "TenAsia"},
+        {"query": "site:dispatch.co.kr 아이돌 화보",
+         "site": "dispatch.co.kr", "source_name": "Dispatch"},
+    ]
+    calls = []
+
+    async def fake_search(query):
+        calls.append(query["source_name"])
+        agent._extra_tavily_calls += 1
+        return [{
+            "title": f"{query['source_name']} BTS comeback",
+            "url": f"https://example.com/{query['source_name']}",
+        }]
+
+    agent._tavily_search = fake_search
+    results = asyncio.run(agent._search_phase4_supplemental())
+
+    assert calls == ["TenAsia", "Dispatch"]
+    assert len(results) == 2
+    assert agent._extra_tavily_calls == 4
+
+
+def test_same_event_different_source_is_not_a_hard_duplicate(tmp_path):
+    topics_dir = tmp_path / "data" / "topics"
+    topics_dir.mkdir(parents=True)
+    today = time.strftime("%Y-%m-%d")
+    (topics_dir / f"{today}.json").write_text(
+        """[{"topics": [{"title": "BTS V airport fashion",
+        "url": "https://osen.co.kr/article/old"}]}]""",
+        encoding="utf-8",
+    )
+    scoring = object.__new__(__import__(
+        "src.topic.scoring", fromlist=["ScoringSystem"]
+    ).ScoringSystem)
+    scoring.config = {"project_root": str(tmp_path)}
+    scoring.duplicate_days = 7
+
+    related = scoring._check_duplicate({
+        "title": "BTS V airport fashion",
+        "url": "https://newsen.com/news/new",
+    })
+    exact = scoring._check_duplicate({
+        "title": "Different title",
+        "url": "https://osen.co.kr/article/old",
+    })
+
+    assert related["is_duplicate"] is False
+    assert related["related_event"] is True
+    assert exact["is_duplicate"] is True
 
 
 def test_credit_budget_and_hard_stop():

@@ -263,6 +263,10 @@ class ScoringSystem:
             self._score_editorial_priority(article, tavily_images)
         )
         total_score = max(0, min(10, total_score + editorial_adjustment))
+        # 同题不同来源不是硬重复：允许作为补充候选，但轻度降权，
+        # 避免连续发布同质内容。完全相同 URL 仍由 ready 检查硬过滤。
+        if duplicate_result.get("related_event"):
+            total_score = max(0, total_score - 0.5)
 
         # 选中理由
         selected_reason = self._generate_reason(
@@ -670,6 +674,7 @@ class ScoringSystem:
         data_dir = Path(self.config.get("project_root", ".")) / "data" / "topics"
         is_duplicate = False
         duplicate_source = ""
+        related_event = False
 
         if data_dir.exists():
             cutoff = datetime.now() - timedelta(days=self.duplicate_days)
@@ -687,14 +692,13 @@ class ScoringSystem:
                             past_title = topic.get("title", "").strip().lower()[:50]
                             past_url = topic.get("url", "")
 
-                            if title and past_title == title:
-                                is_duplicate = True
-                                duplicate_source = past_url or past_title
-                                break
                             if url and past_url == url:
                                 is_duplicate = True
                                 duplicate_source = past_url
                                 break
+                            if title and past_title == title:
+                                related_event = True
+                                duplicate_source = past_url or past_title
                         if is_duplicate:
                             break
                     if is_duplicate:
@@ -705,8 +709,13 @@ class ScoringSystem:
         return {
             "is_duplicate": is_duplicate,
             "duplicate_source": duplicate_source,
+            "related_event": related_event and not is_duplicate,
             "checked_days": self.duplicate_days,
-            "status": "duplicate" if is_duplicate else "unique",
+            "status": (
+                "duplicate" if is_duplicate
+                else "related_event" if related_event
+                else "unique"
+            ),
         }
 
     def _extract_source_urls(self, article: Dict, images: List[Dict]) -> List[str]:
