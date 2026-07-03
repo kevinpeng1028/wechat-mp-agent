@@ -98,7 +98,8 @@ IDOL_BUSINESS_CAREER_KEYWORDS = [
 
 # 常见媒体写法与 TOP_STARS 中标准团名的别名
 IDOL_TARGET_ALIASES = [
-    "i-dle", "gidle", "(g)i-dle", "lesserafim",
+    "i-dle", "gidle", "(g)i-dle", "여자아이들", "아이들",
+    "lesserafim", "bangtan", "防弹少年团", "防弹", "アイヴ", "爱芙",
     "hybe", "bighit", "sm entertainment", "jyp entertainment",
     "yg entertainment",
 ]
@@ -135,6 +136,11 @@ AMBIGUOUS_STANDALONE_TARGETS = {
 GENERIC_SCREEN_MEDIA_KEYWORDS = [
     "actor", "actress", "drama", "movie", "film", "documentary",
     "to star in", "cast", "casting",
+]
+
+ESPORTS_GAME_KEYWORDS = [
+    "배그", "pubg", "pnc", "국가대항전", "e스포츠", "이스포츠",
+    "게임", "크래프톤", "덕지순례", "선수", "경기", "대회",
 ]
 
 BAD_TOPIC_PATTERNS = [
@@ -928,12 +934,15 @@ class TopicAgent(BaseAgent):
                 text,
                 re.IGNORECASE,
             ))
-        if alias in {"i-dle", "gidle", "(g)i-dle"}:
+        if alias in {
+            "i-dle", "gidle", "(g)i-dle", "여자아이들", "아이들",
+        }:
             if not self._contains_topic_keyword(text, alias):
                 return False
             return bool(re.search(
                 r"k-?pop|idol|comeback|\bmv\b|teaser|album|concert|"
-                r"fans?|netizens?|airport|fashion week|member",
+                r"fans?|netizens?|airport|fashion week|member|아이돌|"
+                r"걸그룹|컴백|신곡|콘서트|멤버",
                 text,
                 re.IGNORECASE,
             ))
@@ -969,6 +978,26 @@ class TopicAgent(BaseAgent):
                     f"(命中='{macro_keyword}'): {title[:80]}"
                 )
                 continue
+
+            esports_keyword = next((
+                keyword for keyword in ESPORTS_GAME_KEYWORDS
+                if self._contains_topic_keyword(visible_text, keyword)
+            ), None)
+            if esports_keyword:
+                explicit_entities = ScoringSystem.detect_artist_entities(
+                    visible_text_raw
+                )
+                participation = bool(re.search(
+                    r"참석|출연|공연|participat|perform|appear",
+                    visible_text_raw,
+                    re.IGNORECASE,
+                ))
+                if not explicit_entities or not participation:
+                    logger.info(
+                        f"[选题Agent] 🚫 过滤电竞/游戏主题 "
+                        f"(命中='{esports_keyword}'): {title[:80]}"
+                    )
+                    continue
 
             if self._is_aggregate_page(url) or any(
                 p in visible_text for p in BAD_TOPIC_PATTERNS

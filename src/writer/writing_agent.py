@@ -1,6 +1,7 @@
 """② 写作 Agent - 韩国爱豆状态观察文风 + 严格禁止规则 + Tavily源文改写"""
 
 import asyncio
+import html
 import json
 import re
 from datetime import datetime
@@ -130,10 +131,36 @@ class WritingAgent(BaseAgent):
         """对单篇选题执行写作"""
         # 获取源文章和图片
         source_articles = self._get_source_articles(topic)
+        source_articles = await self._enrich_source_articles(source_articles)
+        fact_points = self._extract_fact_points(source_articles)
+        short_news_mode = (
+            self.get_config(
+                "writing.allow_short_news_when_facts_limited", True
+            )
+            and len(fact_points) < 5
+        )
+        topic["extracted_facts"] = fact_points
+        topic["short_news_mode"] = short_news_mode
+        source_text = self._source_text(source_articles)
+        aliases = sorted(self._detect_source_entities(source_text))
+        logger.info(
+            f"[写作Agent] 写作前事实检查 | "
+            f"original_title={topic.get('original_title') or topic.get('title', '')} | "
+            f"source_url={topic.get('source_url') or topic.get('url', '')} | "
+            f"source_language={topic.get('source_language', 'unknown')} | "
+            f"extracted_facts_count={len(fact_points)} | "
+            f"aliases_detected={aliases} | short_news_mode={short_news_mode} | "
+            f"允许写作={bool(fact_points)}"
+        )
+        if not fact_points:
+            return {"is_success": False, "error": "源标题/摘要不足，无法提取写作事实"}
         tavily_images = topic.get("_tavily_images", [])
 
         # 构建写作提示词（严格遵循用户规则）
-        prompt = self._build_writing_prompt(topic, source_articles, tavily_images)
+        prompt = self._build_writing_prompt(
+            topic, source_articles, tavily_images,
+            fact_points=fact_points, short_news_mode=short_news_mode,
+        )
 
         # 调用 LLM
         try:
@@ -166,7 +193,7 @@ class WritingAgent(BaseAgent):
                 return {"is_success": False, "error": "LLM输出解析失败"}
 
             # 严格检查
-            check_result = self._strict_check(parsed)
+            check_result = self._strict_check(parsed, short_news_mode)
             fidelity_issues = self._check_source_fidelity(
                 parsed, source_articles
             )
@@ -180,10 +207,11 @@ class WritingAgent(BaseAgent):
                 )
                 # 重新生成（简化版）
                 parsed = await self._retry_with_stricter_prompt(
-                    topic, source_articles, tavily_images, check_result["issues"]
+                    topic, source_articles, tavily_images, check_result["issues"],
+                    short_news_mode=short_news_mode,
                 )
                 if parsed:
-                    check_result = self._strict_check(parsed)
+                    check_result = self._strict_check(parsed, short_news_mode)
                     fidelity_issues = self._check_source_fidelity(
                         parsed, source_articles
                     )
@@ -211,6 +239,8 @@ class WritingAgent(BaseAgent):
                 "tavily_images": tavily_images,
                 "topic_info": topic,
                 "position": topic.get("position", "unknown"),
+                "extracted_facts": fact_points,
+                "short_news_mode": short_news_mode,
             }
 
             return result
@@ -223,6 +253,61 @@ class WritingAgent(BaseAgent):
         """获取与当前选题相关的源文章列表"""
         # 当前 topic 本身就是一个源文章
         return [topic]
+
+    async def _enrich_source_articles(
+        self, source_articles: List[Dict]
+    ) -> List[Dict]:
+        """最终候选写作前尝试补充 og/meta 与正文，不引入额外 Tavily 调用。"""
+        enriched = []
+        for original in source_articles:
+            article = dict(original)
+            url = article.get("source_url") or article.get("url")
+            existing = article.get("content") or article.get("summary") or ""
+            if url and len(existing.strip()) < 300:
+                try:
+                    response = await (await self._get_http()).get(
+                        url, follow_redirects=True,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    response.raise_for_status()
+                    page = response.text[:500000]
+                    og_title = self._meta_content(page, "og:title")
+                    description = (
+                        self._meta_content(page, "og:description")
+                        or self._meta_content(page, "description")
+                    )
+                    body = " ".join(
+                        html.unescape(re.sub(r"<[^>]+>", " ", block))
+                        for block in re.findall(
+                            r"<p\b[^>]*>(.*?)</p>", page,
+                            flags=re.IGNORECASE | re.DOTALL,
+                        )[:20]
+                    )
+                    body = re.sub(r"\s+", " ", body).strip()
+                    article["og_title"] = og_title
+                    article["meta_description"] = description
+                    if body:
+                        article["article_body"] = body[:6000]
+                except Exception as exc:
+                    logger.info(
+                        f"[写作Agent] 正文抓取不可用，回退 title/snippet: "
+                        f"{url} | {exc}"
+                    )
+            enriched.append(article)
+        return enriched
+
+    @staticmethod
+    def _meta_content(page: str, key: str) -> str:
+        key_pattern = re.escape(key)
+        patterns = [
+            rf'<meta[^>]+(?:property|name)=["\']{key_pattern}["\'][^>]+content=["\'](.*?)["\']',
+            rf'<meta[^>]+content=["\'](.*?)["\'][^>]+(?:property|name)=["\']{key_pattern}["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, page, re.IGNORECASE | re.DOTALL)
+            if match:
+                return html.unescape(match.group(1)).strip()
+        return ""
 
     def _get_system_prompt(self) -> str:
         """获取系统提示词（严格写作规则）"""
@@ -239,10 +324,10 @@ class WritingAgent(BaseAgent):
 6. 禁止输出 hashtag、emoji、硬性互动CTA
 7. 只输出正文，不要重复标题
 8. 不要输出 Markdown 标题符号 #
-9. 正文目标约400字，理想范围350-500字，硬范围200-800字；不要用空话凑字数
+9. 正文目标约400字、理想范围350-500字；原文事实少时允许160-300字短讯，忠实优先，绝不为凑字数新增内容
 10. 多用短句和自然分段，每段约25-80字，适合手机阅读
 11. 先用一句话点明“谁、发生了什么”，再写公开可确认的看点和讨论点
-12. 语气像中文韩娱快讯：轻快、有一点粉丝视角，但克制、不尖叫、不造谣
+12. 语气像中文韩娱快讯：轻快、克制、不尖叫、不造谣；不要强写粉丝或网友反应
 13. 避免正式新闻稿和AI总结腔：不用“据悉、此外、值得注意的是、引发广泛关注、具有重要意义、展现国际影响力、从行业角度来看、文化输出”
 14. 标题把艺人名放前面，信息点明确、简短自然，不要机器翻译感和夸张标题党
 15. 涉及恋情、争议、法律回应时只复述来源已公开事实，不扩写私人细节，不把猜测写成事实
@@ -254,12 +339,14 @@ class WritingAgent(BaseAgent):
 输出格式：严格JSON，包含 title, summary, content_text, content_html 字段。"""
 
     def _build_writing_prompt(
-        self, topic: Dict, source_articles: List[Dict], tavily_images: List[Dict]
+        self, topic: Dict, source_articles: List[Dict], tavily_images: List[Dict],
+        fact_points: Optional[List[str]] = None,
+        short_news_mode: bool = False,
     ) -> str:
         """构建写作提示词"""
         # 构建源文章参考
         source_material = self._build_source_material(source_articles)
-        fact_points = self._extract_fact_points(source_articles)
+        fact_points = fact_points or self._extract_fact_points(source_articles)
 
         # 构建图片信息（不含具体画面描述，只提供安全信息）
         image_info = self._build_image_info(tavily_images)
@@ -289,7 +376,7 @@ class WritingAgent(BaseAgent):
 
 ## 写作要求
 1. **语言**: 全文简体中文，韩语/英语源文必须翻译，韩国人名用中文译名
-2. **字数**: 目标约400字，理想350-500字，允许200-800字；少于200字必须补写，超过800字必须压缩，不写空话
+2. **字数**: 目标约400字，理想350-500字。{"当前为短讯模式：事实较少，允许160-300字，忠实完整即可，绝不为凑字数扩写" if short_news_mode else "当前事实较充分，优先写到350-500字"}；绝对不能用原文没有的信息补字数
 3. **忠实度**: 人名、团体、公司、时间、地点、事件性质、官方回应和争议边界必须与原文保持一致；事实内容保持85%-90%以上一致
 4. **整理范围**: 只做轻度中文资讯化整理，可调整中文表达、段落顺序和阅读节奏；不逐句翻译，也不新增事实
 5. **文风**: 轻快自然的韩娱快讯。少正式新闻腔，先说谁发生了什么，再写公开看点和讨论
@@ -297,7 +384,7 @@ class WritingAgent(BaseAgent):
 7. **禁止口吻**: {', '.join(banned[:8])} 等饭圈表达
 8. **安全表达**: 可用 {', '.join(safe[:5])}
 9. **格式**: {"不输出Markdown标题符号" if rules.get("no_markdown_headings") else ""} {"不输出hashtag" if rules.get("no_hashtags") else ""}
-10. **事实边界**: 原文没有网友/粉丝反应、公司回应或争议信息时，正文绝对不能自行补充
+10. **事实边界**: 网友/粉丝反应不是固定段落；原文没有时完全不要写，原文有时才忠实保留。文章结构按事实决定，不强制四段
 11. **禁止宏观发挥**: 不写市场定位、公司格局、世代交替、行业趋势、全球影响力等原文没有的判断
 12. **争议边界**: 不把猜测写成事实，不扩大争议，不使用刺激性定性
 13. **图片边界**: 未确认的服装、动作、表情、背景、构图一律不写
@@ -309,7 +396,7 @@ class WritingAgent(BaseAgent):
 {{
   "title": "文章标题（简体中文，不含饭圈词汇）",
   "summary": "摘要（简体中文，≤120字）",
-  "content_text": "纯文本正文（简体中文，目标约400字，理想350-500字，硬范围200-800字）",
+  "content_text": "纯文本正文（简体中文，{"短讯模式160-300字" if short_news_mode else "目标350-500字"}，忠实优先）",
   "content_html": "HTML正文（含<img>标签占位，用{{IMAGE_N}}替换实际图片位置）"
 }}
 ```
@@ -326,7 +413,14 @@ class WritingAgent(BaseAgent):
         parts = []
         for i, article in enumerate(source_articles[:3]):
             title = article.get("title", "未知标题")
-            content = article.get("content", "") or article.get("raw_content", "")
+            content = (
+                article.get("article_body")
+                or article.get("content")
+                or article.get("raw_content")
+                or article.get("meta_description")
+                or article.get("summary")
+                or ""
+            )
             content_preview = content[:600] if content else "（无内容）"
 
             parts.append(
@@ -340,12 +434,19 @@ class WritingAgent(BaseAgent):
         """从原题和原文摘取5-8个事实片段，作为写作边界。"""
         points = []
         for article in source_articles[:3]:
-            title = (article.get("original_title") or article.get("title") or "").strip()
+            title = (
+                article.get("og_title")
+                or article.get("original_title")
+                or article.get("title")
+                or ""
+            ).strip()
             if title:
                 points.append(f"原文标题：{title}")
             content = (
-                article.get("content")
+                article.get("article_body")
+                or article.get("content")
                 or article.get("raw_content")
+                or article.get("meta_description")
                 or article.get("summary")
                 or ""
             )
@@ -357,7 +458,23 @@ class WritingAgent(BaseAgent):
                     break
             if len(points) >= 8:
                 break
-        return points[:8] or ["仅使用原文标题中明确陈述的事实"]
+        return points[:8]
+
+    @staticmethod
+    def _source_text(source_articles: List[Dict]) -> str:
+        return " ".join(
+            str(article.get(key) or "")
+            for article in source_articles
+            for key in (
+                "og_title", "original_title", "title", "meta_description",
+                "summary", "content", "raw_content", "article_body",
+            )
+        )
+
+    @staticmethod
+    def _detect_source_entities(text: str) -> set:
+        from src.topic.scoring import ScoringSystem
+        return ScoringSystem.detect_artist_entities(text)
 
     def _check_source_fidelity(
         self, parsed: Dict, source_articles: List[Dict]
@@ -369,15 +486,7 @@ class WritingAgent(BaseAgent):
             parsed.get("summary", ""),
             parsed.get("content_text", ""),
         ])
-        source = " ".join(
-            " ".join([
-                article.get("original_title") or article.get("title") or "",
-                article.get("content") or "",
-                article.get("raw_content") or "",
-                article.get("summary") or "",
-            ])
-            for article in source_articles
-        )
+        source = self._source_text(source_articles)
         output_lower = output.lower()
         source_lower = source.lower()
 
@@ -390,7 +499,10 @@ class WritingAgent(BaseAgent):
             if phrase in output:
                 issues.append(f"新增AI宏观判断: '{phrase}'")
 
-        reaction_terms = ["网友", "粉丝", "评论区", "netizen", "fans react"]
+        reaction_terms = [
+            "网友", "粉丝", "评论区", "netizen", "fans react",
+            "네티즌", "팬 반응", "팬들은",
+        ]
         if any(term in output_lower for term in reaction_terms) and not any(
             term in source_lower for term in reaction_terms
         ):
@@ -406,14 +518,8 @@ class WritingAgent(BaseAgent):
 
         try:
             from src.topic.scoring import ScoringSystem
-            source_people = {
-                star for star in ScoringSystem.TOP_STARS
-                if ScoringSystem._match_star(star, source)
-            }
-            output_people = {
-                star for star in ScoringSystem.TOP_STARS
-                if ScoringSystem._match_star(star, output)
-            }
+            source_people = ScoringSystem.detect_artist_entities(source)
+            output_people = ScoringSystem.detect_artist_entities(output)
             for person in sorted(output_people - source_people):
                 issues.append(f"原文未提及艺人，禁止新增: {person}")
         except Exception:
@@ -468,7 +574,9 @@ class WritingAgent(BaseAgent):
 
         return None
 
-    def _strict_check(self, parsed: Dict) -> Dict:
+    def _strict_check(
+        self, parsed: Dict, short_news_mode: bool = False
+    ) -> Dict:
         """严格检查输出是否符合规则"""
         issues = []
 
@@ -489,9 +597,19 @@ class WritingAgent(BaseAgent):
 
         # 检查字数
         char_count = len(content.replace(" ", "").replace("\n", ""))
-        if char_count < 200:
-            issues.append(f"字数不足({char_count} < 200)")
-        elif char_count > 800:
+        absolute_min = self.get_config("writing.absolute_min_chars", 160)
+        effective_min = absolute_min if short_news_mode else 200
+        ideal_max = self.get_config("writing.ideal_max_chars", 500)
+        short_max = self.get_config("writing.short_news_mode_max_chars", 300)
+        if char_count < effective_min:
+            issues.append(f"字数不足({char_count} < {effective_min})")
+        elif short_news_mode and char_count > short_max:
+            # 短讯超过推荐值不是事实错误，不强制失败。
+            logger.info(
+                f"[写作Agent] short_news_mode 字数 {char_count}，"
+                f"高于推荐上限 {short_max}，但不强制截断"
+            )
+        elif not short_news_mode and char_count > max(800, ideal_max):
             issues.append(f"字数超标({char_count} > 800)")
 
         # 检查禁止口吻
@@ -539,7 +657,8 @@ class WritingAgent(BaseAgent):
         }
 
     async def _retry_with_stricter_prompt(
-        self, topic, source_articles, tavily_images, issues
+        self, topic, source_articles, tavily_images, issues,
+        short_news_mode: bool = False,
     ) -> Optional[Dict]:
         """使用更严格的提示词重试"""
         logger.info(f"[写作Agent] 重试生成，问题: {issues}")
@@ -549,7 +668,7 @@ class WritingAgent(BaseAgent):
 请重新生成，特别注意:
 1. 所有内容必须是简体中文，韩语/英语必须完全翻译
 2. 绝对不要出现上述问题
-3. 目标约400字，优先控制在350-500字；少于200字必须补写，超过800字必须压缩
+3. {"当前是事实有限的短讯模式，允许160-300字，不为凑400字补写" if short_news_mode else "事实充分时目标350-500字"}；忠实优先
 4. 不要写任何具体图片画面细节
 5. 不要使用饭圈口吻
 6. 韩国人名用中文译名

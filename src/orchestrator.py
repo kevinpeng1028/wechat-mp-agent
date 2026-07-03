@@ -160,11 +160,15 @@ class WeChatMPOrchestrator:
                 report["steps"].append(self._result_to_dict(result))
 
             if not written:
-                report["final_status"] = "failed_at_image"
-                raise RuntimeError(
-                    f"前 {min(len(fallback_topics), max_attempts)} 篇候选图片均失败，"
-                    "终止流程，不进入排版/草稿"
+                failures = getattr(self, "_last_fallback_failures", {})
+                attempted_count = min(len(fallback_topics), max_attempts)
+                status, error = self._fallback_failure_outcome(
+                    failures, attempted_count
                 )
+                report["final_status"] = status
+                report["error"] = error
+                logger.error(f"[编排器] {report['error']}")
+                return self._finalize_report(report)
 
             ctx["written_articles"] = written
             ctx["downloaded_images"] = images
@@ -200,7 +204,7 @@ class WeChatMPOrchestrator:
 
             if not format_result.is_success:
                 console.print(f"[red]❌ 排版失败: {self._short_error(format_result.error)}[/red]")
-                report["final_status"] = "failed_at_formatter"
+                report["final_status"] = "failed_at_formatting"
                 return self._finalize_report(report)
 
             ctx.update(format_result.output or {})
@@ -309,6 +313,7 @@ class WeChatMPOrchestrator:
         successful_images = []
         results = []
         attempted = candidates[:max_attempts]
+        failure_counts = {"writing": 0, "image": 0, "formatting": 0}
 
         for index, topic in enumerate(attempted, start=1):
             title = topic.get("title", "?")
@@ -320,11 +325,17 @@ class WeChatMPOrchestrator:
             writer_result = await self.writer.run(single_ctx)
             results.append(writer_result)
             if not writer_result.is_success:
+                failure_counts["writing"] += 1
+                topic["write_failed"] = True
+                topic["write_failure_reason"] = writer_result.error
                 logger.warning(f"[编排器] 写作失败，切换下一篇: {title[:80]}")
                 continue
 
             article = (writer_result.output or {}).get("written_articles", [None])[0]
             if not article:
+                failure_counts["writing"] += 1
+                topic["write_failed"] = True
+                topic["write_failure_reason"] = "写作结果缺少文章内容"
                 continue
             image_ctx = dict(ctx)
             image_ctx["tavily_images"] = article.get("tavily_images", [])
@@ -334,6 +345,7 @@ class WeChatMPOrchestrator:
             images = (image_result.output or {}).get("images", [])
 
             if not image_result.is_success or not images:
+                failure_counts["image"] += 1
                 topic["image_failed"] = True
                 topic["image_failure_reason"] = (
                     image_result.error
@@ -357,7 +369,28 @@ class WeChatMPOrchestrator:
             if len(successful_articles) >= target_count:
                 break
 
+        self._last_fallback_failures = failure_counts
         return successful_articles, successful_images, results
+
+    @staticmethod
+    def _fallback_failure_outcome(
+        failures: Dict[str, int], attempted_count: int
+    ):
+        if failures.get("writing", 0) == attempted_count:
+            return (
+                "failed_at_writing",
+                f"前 {attempted_count} 篇候选写作均失败，终止流程",
+            )
+        if failures.get("image", 0) > 0:
+            return (
+                "failed_at_image",
+                f"前 {attempted_count} 篇候选图片均失败，"
+                "终止流程，不进入排版/草稿",
+            )
+        return (
+            "failed_at_writing",
+            f"前 {attempted_count} 篇候选未能完成写作，终止流程",
+        )
 
     # ==================== 辅助方法 ====================
 

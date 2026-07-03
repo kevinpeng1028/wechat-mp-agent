@@ -84,6 +84,49 @@ def test_short_artist_names_require_strict_kpop_context():
     assert ScoringSystem._match_star("Ten", "WayV Ten airport fashion")
 
 
+def test_korean_han_and_daesung_require_explicit_artist_context():
+    rejected = [
+        "ITZY는 역시 믿지..가오슝 아레나 찢은 월드투어 대성황",
+        "지역 사업 대성공 소식",
+        "한 사람 한 번 한국 한류 이야기",
+        "'다양한 체험과 공연을 함께 즐기다'…'배그' 국가대항전 "
+        "'PNC 2026' [덕지순례]",
+        "PUBG PNC e스포츠 국가대항전 경기",
+    ]
+    for title in rejected:
+        assert filter_topics({
+            "title": title,
+            "url": "https://xportsnews.com/article/story",
+            "summary": "",
+        }) == []
+
+    allowed = [
+        "빅뱅 대성 콘서트 개최",
+        "BIGBANG Daesung solo concert",
+        "스트레이키즈 한 신곡 공개",
+        "Stray Kids Han Jisung live",
+        "방탄소년단 진 퀴즈쇼 언급",
+        "BTS Jin quiz show mention",
+        "아이브 음악방송 출연",
+        "IVE music show stage",
+        "있지 월드투어 성황",
+        "ITZY world tour concert",
+        "여자아이들 신곡 컴백",
+        "아이들 걸그룹 콘서트",
+    ]
+    for title in allowed:
+        assert filter_topics({
+            "title": title,
+            "url": "https://osen.co.kr/article/story",
+            "summary": "",
+        })
+
+    assert not ScoringSystem._match_star("대성", "월드투어 대성황")
+    assert not ScoringSystem._match_star("한", "한 사람 한 번")
+    assert ScoringSystem._match_star("대성", "빅뱅 대성 콘서트")
+    assert ScoringSystem._match_star("한", "스트레이키즈 한 신곡")
+
+
 def test_keeps_enhypen_japan_single_mv_despite_body_template_words():
     article = {
         "title": "ENHYPEN brings warmth and hope in new Japan single "

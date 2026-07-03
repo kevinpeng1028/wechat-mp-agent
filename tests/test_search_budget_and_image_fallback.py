@@ -398,6 +398,22 @@ def test_all_image_failures_return_no_articles():
     assert images == []
 
 
+def test_failure_outcome_distinguishes_writing_from_image_failures():
+    WeChatMPOrchestrator = _orchestrator_class()
+    status, message = WeChatMPOrchestrator._fallback_failure_outcome(
+        {"writing": 4, "image": 0}, 4
+    )
+    assert status == "failed_at_writing"
+    assert "写作均失败" in message
+    assert "图片" not in message
+
+    status, message = WeChatMPOrchestrator._fallback_failure_outcome(
+        {"writing": 0, "image": 4}, 4
+    )
+    assert status == "failed_at_image"
+    assert "图片均失败" in message
+
+
 def test_two_image_failures_continue_to_third_candidate():
     WeChatMPOrchestrator = _orchestrator_class()
     orchestrator = object.__new__(WeChatMPOrchestrator)

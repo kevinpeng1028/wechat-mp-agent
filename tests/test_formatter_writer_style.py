@@ -110,3 +110,60 @@ def test_writer_fidelity_allows_reactions_only_when_source_reports_them():
         "content_text": "IVE公开了回归预告，原文提到粉丝也给出了积极反应。",
     }
     assert writer._check_source_fidelity(parsed, source) == []
+
+    korean_source = [{
+        "title": "아이브 티저 공개",
+        "content": "팬들은 새 티저에 긍정적인 반응을 보였다.",
+    }]
+    assert writer._check_source_fidelity(parsed, korean_source) == []
+
+
+def test_writer_fidelity_allows_no_reaction_when_source_and_output_have_none():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": []}}
+    source = [{"title": "아이브 음악방송 출연", "content": "무대를 공개했다."}]
+    parsed = {
+        "title": "IVE亮相音乐节目",
+        "summary": "",
+        "content_text": "IVE公开了最新音乐节目舞台，相关活动按计划进行。",
+    }
+    assert writer._check_source_fidelity(parsed, source) == []
+
+
+def test_writer_alias_mapping_treats_korean_and_english_names_as_same_entity():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": []}}
+    cases = [
+        ("방탄소년단 진 새 소식", "BTS Jin公开新动态"),
+        ("방탄소년단 새 소식", "BTS公开新动态"),
+        ("아이브 음악방송", "IVE亮相音乐节目"),
+        ("있지 월드투어", "ITZY继续世界巡演"),
+    ]
+    for source_title, output_text in cases:
+        issues = writer._check_source_fidelity(
+            {"title": output_text, "summary": "", "content_text": output_text},
+            [{"title": source_title, "content": source_title}],
+        )
+        assert not any("未提及艺人" in issue for issue in issues)
+
+
+def test_short_news_mode_accepts_191_chars_but_normal_mode_prefers_more():
+    writer = object.__new__(WritingAgent)
+    writer.config = {
+        "writing": {
+            "absolute_min_chars": 160,
+            "short_news_mode_max_chars": 300,
+            "ideal_max_chars": 500,
+        },
+        "writer_agent": {"banned_phrases": []},
+    }
+    parsed = {
+        "title": "IVE活动动态",
+        "summary": "",
+        "content_text": "这是一条忠实整理的短讯。" * 17,
+    }
+    assert 160 <= len(parsed["content_text"]) <= 300
+    assert writer._strict_check(parsed, short_news_mode=True)["passed"]
+
+    too_short = dict(parsed, content_text="短讯" * 50)
+    assert not writer._strict_check(too_short, short_news_mode=True)["passed"]

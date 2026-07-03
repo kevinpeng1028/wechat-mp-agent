@@ -36,3 +36,31 @@ def test_macro_analysis_is_heavily_downgraded():
 
     assert adjustment < 0
     assert "宏观分析" in notes
+
+
+def test_music_and_tour_events_outrank_quiz_mentions_and_esports():
+    scoring = ScoringSystem({"topic_agent": {"scoring": {}}})
+    images = [{"url": "one.jpg"}, {"url": "two.jpg"}]
+    music = {
+        "title": "ITZY world tour concert",
+        "content": "ITZY continued the tour.",
+        "url": "https://osen.co.kr/article/1",
+    }
+    quiz = {
+        "title": "BTS Jin mentioned on UK quiz show",
+        "content": "A quiz referenced Jin.",
+        "url": "https://osen.co.kr/article/2",
+    }
+    esports = {
+        "title": "PUBG PNC e스포츠 국가대항전",
+        "content": "게임 대회 경기",
+        "url": "https://xportsnews.com/article/3",
+    }
+    _, music_adjustment, _ = scoring._score_editorial_priority(music, images)
+    _, quiz_adjustment, _ = scoring._score_editorial_priority(quiz, images)
+    _, esports_adjustment, esports_notes = scoring._score_editorial_priority(
+        esports, images
+    )
+
+    assert music_adjustment > quiz_adjustment > esports_adjustment
+    assert "电竞/游戏" in esports_notes

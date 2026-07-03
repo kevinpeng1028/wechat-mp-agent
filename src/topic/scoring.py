@@ -111,6 +111,46 @@ class ScoringSystem:
         "Yun", "ISA", "Bae", "Lia", "Sie", "Shy", "The8",
     }
 
+    ARTIST_ENTITY_ALIASES = {
+        "BTS": ["BTS", "방탄소년단", "防弹少年团", "防弹", "Bangtan"],
+        "BTS_JIN": [
+            "BTS Jin", "방탄소년단 진", "Jin", "진", "김석진",
+            "Kim Seokjin", "金硕珍",
+        ],
+        "IVE": ["IVE", "아이브", "アイヴ", "爱芙"],
+        "ITZY": ["ITZY", "있지"],
+        "IDLE": ["i-dle", "(G)I-DLE", "여자아이들", "(여자)아이들", "아이들"],
+        "STRAY_KIDS_HAN": [
+            "Stray Kids Han", "SKZ Han", "스트레이키즈 한",
+            "한지성", "Han Jisung", "HAN of Stray Kids",
+            "Stray Kids member Han",
+        ],
+        "BIGBANG_DAESUNG": [
+            "BIGBANG Daesung", "BIGBANG 대성", "빅뱅 대성",
+            "Daesung", "Kang Daesung", "강대성",
+        ],
+    }
+
+    @classmethod
+    def detect_artist_entities(cls, text: str) -> set:
+        """将韩/英/中/日别名归一到同一艺人实体。"""
+        entities = set()
+        mapped_aliases = {
+            alias.casefold()
+            for aliases in cls.ARTIST_ENTITY_ALIASES.values()
+            for alias in aliases
+        }
+        for entity, aliases in cls.ARTIST_ENTITY_ALIASES.items():
+            if any(cls._match_star(alias, text) for alias in aliases):
+                entities.add(entity)
+        for star in cls.TOP_STARS:
+            if (
+                star.casefold() not in mapped_aliases
+                and cls._match_star(star, text)
+            ):
+                entities.add(star)
+        return entities
+
     @classmethod
     def _match_star(cls, star: str, text: str) -> bool:
         """严格匹配艺人名；短团名需要词边界和 K-pop 上下文。"""
@@ -122,7 +162,8 @@ class ScoringSystem:
             r"source music|girl group|boy group|comeback|music video|\bmv\b|"
             r"teaser|album|concert|fans?|netizens?|airport|fashion week|"
             r"music show|member|wonyoung|yujin|gaeul|\brei\b|\bliz\b|leeseo|"
-            r"taehyung|jungkook|jimin|suga|\bjin\b|jennie|lisa|karina"
+            r"taehyung|jungkook|jimin|suga|\bjin\b|jennie|lisa|karina|"
+            r"回归|组合|成员|巡演|演唱会|音乐节目|爱豆"
         )
 
         if star == "V":
@@ -137,6 +178,30 @@ class ScoringSystem:
             return bool(re.search(
                 r"(?:\bNCT\s+Ten\b|\bWayV\s+Ten\b|\bTen\s+Lee\b|"
                 r"\bChittaphon(?:\s+Leechaiyapornkul)?\b)",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
+        if star in {"한", "Han"}:
+            return bool(re.search(
+                r"(?:\bStray\s+Kids(?:\s+member)?\s+Han\b|"
+                r"\bSKZ\s+Han\b|\bHAN\s+of\s+Stray\s+Kids\b|"
+                r"스트레이키즈\s*한(?![가-힣])|한지성|"
+                r"\bHan\s+Jisung\b)",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
+        if star in {"대성", "Daesung"}:
+            if re.search(r"대성(?:황|공|리|동)", text):
+                return False
+            return bool(re.search(
+                r"(?:BIGBANG\s+(?:대성|Daesung)|빅뱅\s+대성|"
+                r"\bKang\s+Daesung\b|\bDaesung\b|강대성|"
+                r"(?<![가-힣])대성(?![가-힣]).{0,20}"
+                r"(?:빅뱅|멤버|솔로|콘서트|컴백)|"
+                r"(?:빅뱅|멤버|솔로|콘서트|컴백).{0,20}"
+                r"(?<![가-힣])대성(?![가-힣]))",
                 text,
                 flags=re.IGNORECASE,
             ))
@@ -166,8 +231,10 @@ class ScoringSystem:
             )
             return bool(re.search(pattern, text_lower))
 
-        # 韩文名使用子串匹配
-        return star_lower in text_lower
+        # 韩文名必须是完整词，避免 대성황→대성 等普通词子串误判。
+        return bool(re.search(
+            rf"(?<![가-힣]){re.escape(star)}(?![가-힣])", text
+        ))
 
     # 明确排除的低热度关键词（出现这些的文章降分）
     LOW_HEAT_KEYWORDS = [
@@ -190,6 +257,14 @@ class ScoringSystem:
         "fans react", "netizens", "controversy", "agency response",
         "legal action", "컴백", "뮤직비디오", "티저", "콘서트",
         "공항", "패션위크", "브랜드", "라이브", "입장",
+    ]
+    MEDIUM_EVENT_KEYWORDS = [
+        "quiz show", "variety reference", "mentioned on", "overseas media",
+        "해외 방송", "퀴즈쇼", "예능 언급",
+    ]
+    ESPORTS_GAME_KEYWORDS = [
+        "pubg", "pnc", "e스포츠", "이스포츠", "배그", "국가대항전",
+        "크래프톤", "덕지순례", "게임", "선수", "경기", "대회",
     ]
     MACRO_ANALYSIS_KEYWORDS = [
         "generation shift", "k-pop generation", "big 4", "big four",
@@ -320,6 +395,14 @@ class ScoringSystem:
              if keyword in title_summary),
             None,
         )
+        esports_hit = next(
+            (keyword for keyword in self.ESPORTS_GAME_KEYWORDS
+             if keyword in title_summary),
+            None,
+        )
+        medium_event = any(
+            keyword in title_summary for keyword in self.MEDIUM_EVENT_KEYWORDS
+        )
         has_source_metadata = bool(
             article.get("original_title")
             and article.get("source_url")
@@ -343,12 +426,18 @@ class ScoringSystem:
         else:
             adjustment -= 1.0
             notes.append("缺少具体事件")
+        if medium_event and not has_event:
+            adjustment += 0.2
+            notes.append("海外节目/媒体提及")
         if has_source_metadata:
             adjustment += 0.4
             notes.append("来源元数据完整")
         if macro_hit:
             adjustment -= 3.0
             notes.append(f"宏观分析:{macro_hit}")
+        if esports_hit:
+            adjustment -= 6.0
+            notes.append(f"电竞/游戏:{esports_hit}")
 
         priority = (
             (4 if is_korean_media else 0)

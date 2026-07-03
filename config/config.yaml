@@ -149,6 +149,16 @@ topic_agent:
     # 重复检测：最近N天内的文章不算
     duplicate_check_days: 7
 
+# ---- 写作长度与短讯模式 ----
+writing:
+  target_word_count: 400
+  ideal_min_chars: 350
+  ideal_max_chars: 500
+  absolute_min_chars: 160
+  short_news_mode_min_chars: 160
+  short_news_mode_max_chars: 300
+  allow_short_news_when_facts_limited: true
+
 # ---- 写作 Agent 配置 ----
 writer_agent:
   # 韩国爱豆状态观察文风
