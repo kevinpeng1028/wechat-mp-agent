@@ -66,9 +66,33 @@ def test_consistency_rejects_majority_low_quality_images():
     assert any("超过一半图片不合格" in issue for issue in result["issues"])
 
 
-def test_single_high_quality_image_is_warning_exception():
+def test_single_high_quality_image_fails_by_default():
     checker = ImageConsistencyChecker({
-        "topic_agent": {"image": {"min_images_required": 2}},
+        "topic_agent": {"image": {
+            "min_images_required": 2,
+            "allow_single_high_quality_image": False,
+        }},
+        "formatter_agent": {"consistency_check": {"threshold": 40}},
+    })
+    result = checker.check_consistency(
+        {"title": "BTS Jungkook update", "content": ""},
+        [{
+            "url": "https://img.example.com/good.jpg",
+            "quality_passed": True,
+            "quality_score": 100,
+            "description": "BTS Jungkook news photo",
+        }],
+    )
+    assert result["passed"] is False
+    assert any("有效图片不足" in issue for issue in result["issues"])
+
+
+def test_single_high_quality_image_requires_explicit_opt_in():
+    checker = ImageConsistencyChecker({
+        "topic_agent": {"image": {
+            "min_images_required": 2,
+            "allow_single_high_quality_image": True,
+        }},
         "formatter_agent": {"consistency_check": {"threshold": 40}},
     })
     result = checker.check_consistency(

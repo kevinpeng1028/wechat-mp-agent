@@ -108,7 +108,24 @@ ALLOWED_KPOP_SOURCE_DOMAINS = {
     "kpopstarz.com", "nme.com", "billboard.com", "osen.co.kr",
     "starnewskorea.com", "newsen.com", "xportsnews.com", "mydaily.co.kr",
     "dispatch.co.kr", "tenasia.hankyung.com", "entertain.naver.com",
+    "sports.chosun.com", "tvreport.co.kr", "mk.co.kr",
+    "heraldpop.com", "imbc.com",
 }
+
+KOREAN_MEDIA_DOMAINS = {
+    "entertain.naver.com", "osen.co.kr", "newsen.com",
+    "starnewskorea.com", "xportsnews.com", "mydaily.co.kr",
+    "dispatch.co.kr", "tenasia.hankyung.com", "sports.chosun.com",
+    "tvreport.co.kr", "mk.co.kr", "heraldpop.com", "imbc.com",
+}
+
+MACRO_TOPIC_KEYWORDS = [
+    "k-pop generation", "generation shift", "big 4", "big four",
+    "successor list", "heir list", "industry analysis", "industry trend",
+    "entertainment trend", "market outlook", "company ranking",
+    "世代交替", "四大公司", "接班人", "行业分析", "行业趋势",
+    "格局分析", "名单盘点",
+]
 
 AMBIGUOUS_STANDALONE_TARGETS = {
     "Jin", "V", "RM", "Han", "Jay", "Jake", "Mark", "Ten",
@@ -324,7 +341,10 @@ class TopicAgent(BaseAgent):
         # Step 4: 排序选优
         scored_sorted = sorted(
             scored,
-            key=lambda x: x.get("scores", {}).get("total_score", 0),
+            key=lambda x: (
+                x.get("_source_priority", 0),
+                x.get("scores", {}).get("total_score", 0),
+            ),
             reverse=True
         )
 
@@ -420,17 +440,25 @@ class TopicAgent(BaseAgent):
         await run_queries(
             tiers["primary"], "core", self.max_core_tavily_queries
         )
-        eligible = len(self._filter_idol_centric_topics(all_results))
+        eligible = len([
+            article for article in self._filter_idol_centric_topics(all_results)
+            if article.get("_tavily_images")
+        ])
         if eligible < self.min_candidates_before_extra:
+            # 先用最多2次预算补充更多韩国本土媒体。
             await run_queries(
-                tiers["secondary"], "extra", self.max_extra_tavily_queries
+                tiers["secondary"], "extra",
+                min(2, self.max_extra_tavily_queries)
             )
-            eligible = len(self._filter_idol_centric_topics(all_results))
-        if eligible < 2:
-            remaining_extra = max(
-                0, self.max_extra_tavily_queries - self._extra_tavily_calls
+            eligible = len([
+                article for article in self._filter_idol_centric_topics(all_results)
+                if article.get("_tavily_images")
+            ])
+        if eligible < self.min_candidates_before_extra:
+            # 韩媒仍不足时才使用英文韩娱站，且共享剩余追加预算。
+            await run_queries(
+                tiers["supplemental"], "extra", self.max_extra_tavily_queries
             )
-            await run_queries(tiers["supplemental"], "extra", remaining_extra)
 
         logger.info(
             f"[选题Agent] Tavily搜索完成: {len(all_results)} 篇独特文章 | "
@@ -445,28 +473,30 @@ class TopicAgent(BaseAgent):
 
     def _build_tiered_search_queries(self) -> Dict[str, List[Dict]]:
         primary = [
-            ("soompi.com", "Soompi", "Stray Kids SEVENTEEN TXT ENHYPEN concert album"),
-            ("allkpop.com", "AllKpop", "IVE LE SSERAFIM BABYMONSTER i-dle MV teaser comeback"),
-            ("koreaboo.com", "Koreaboo", "BTS BLACKPINK NewJeans aespa fans react goes viral"),
-            ("sbsstar.net", "SBS Star", "TWICE ITZY NMIXX Red Velvet latest controversy"),
+            ("entertain.naver.com", "Naver Entertainment", "BTS BLACKPINK aespa IVE 컴백 공항 패션"),
+            ("osen.co.kr", "OSEN", "BTS aespa IVE BLACKPINK 컴백 신곡 콘서트"),
+            ("newsen.com", "NewsEn", "BTS BLACKPINK aespa IVE 공항 브랜드 행사"),
+            ("starnewskorea.com", "StarNews", "BTS BLACKPINK NewJeans aespa 컴백 무대"),
+            ("xportsnews.com", "XportsNews", "Stray Kids SEVENTEEN TXT ENHYPEN 컴백 콘서트"),
+            ("mydaily.co.kr", "MyDaily", "TWICE ITZY NMIXX RIIZE 공항 패션 신곡"),
+        ]
+        secondary = [
+            ("dispatch.co.kr", "Dispatch", "BTS BLACKPINK aespa IVE"),
+            ("tenasia.hankyung.com", "TenAsia", "BTS BLACKPINK aespa IVE"),
+            ("sports.chosun.com", "Sports Chosun", "BTS BLACKPINK aespa IVE"),
+            ("tvreport.co.kr", "TVReport", "BTS BLACKPINK aespa IVE"),
+            ("mk.co.kr", "MK Sports Star Today", "BTS BLACKPINK aespa IVE"),
+            ("heraldpop.com", "Herald POP", "BTS BLACKPINK aespa IVE"),
+            ("imbc.com", "iMBC Entertainment", "BTS BLACKPINK aespa IVE"),
+        ]
+        supplemental = [
+            ("koreaboo.com", "Koreaboo", "BTS BLACKPINK aespa IVE fans react goes viral airport fashion week brand event"),
+            ("allkpop.com", "AllKpop", "BTS BLACKPINK Stray Kids dating rumor controversy comeback MV"),
+            ("soompi.com", "Soompi", "HYBE responds SM responds JYP responds YG responds comeback concert"),
+            ("sbsstar.net", "SBS Star", "BTS BLACKPINK aespa IVE latest"),
             ("kpopstarz.com", "KpopStarz", "BTS V Suga Jennie Lisa Karina Wonyoung fashion week airport"),
             ("nme.com", "NME K-pop", "k-pop BTS BLACKPINK aespa IVE latest"),
             ("billboard.com", "Billboard K-pop", "k-pop BTS BLACKPINK Stray Kids NewJeans chart"),
-        ]
-        secondary = [
-            ("entertain.naver.com", "Naver Entertainment", "BTS BLACKPINK aespa IVE"),
-            ("osen.co.kr", "OSEN", "BTS aespa IVE BLACKPINK"),
-            ("starnewskorea.com", "StarNews", "BTS BLACKPINK NewJeans aespa"),
-            ("newsen.com", "NewsEn", "BTS BLACKPINK aespa IVE"),
-            ("xportsnews.com", "XportsNews", "BTS BLACKPINK aespa IVE"),
-            ("mydaily.co.kr", "MyDaily", "BTS BLACKPINK aespa IVE"),
-            ("dispatch.co.kr", "Dispatch", "BTS BLACKPINK aespa IVE"),
-            ("tenasia.hankyung.com", "TenAsia", "BTS BLACKPINK aespa IVE"),
-        ]
-        supplemental = [
-            ("koreaboo.com", "Koreaboo supplemental", "BTS BLACKPINK aespa IVE fans react goes viral airport fashion week brand event"),
-            ("allkpop.com", "AllKpop supplemental", "BTS BLACKPINK Stray Kids dating rumor controversy"),
-            ("soompi.com", "Soompi supplemental", "HYBE responds SM responds JYP responds YG responds protects artists legal action"),
         ]
         primary_hours = self.get_config(
             "topic_agent.search.freshness_hours_primary", 24
@@ -474,17 +504,18 @@ class TopicAgent(BaseAgent):
         secondary_hours = self.get_config(
             "topic_agent.search.freshness_hours_secondary", 72
         )
-        def pack(rows, freshness_hours):
+        def pack(rows, freshness_hours, source_language):
             return [{
                 "query": (f"site:{site} " if site else "") + suffix,
                 "site": site,
                 "source_name": name,
                 "freshness_hours": freshness_hours,
+                "source_language": source_language,
             } for site, name, suffix in rows]
         return {
-            "primary": pack(primary, primary_hours),
-            "secondary": pack(secondary, secondary_hours),
-            "supplemental": pack(supplemental, secondary_hours),
+            "primary": pack(primary, primary_hours, "ko"),
+            "secondary": pack(secondary, secondary_hours, "ko"),
+            "supplemental": pack(supplemental, secondary_hours, "en"),
         }
 
     def _load_daily_search_cache(self):
@@ -638,6 +669,10 @@ class TopicAgent(BaseAgent):
                     "published_date_str": published_str,
                     "source_name": source_name,
                     "source_site": query_info.get("site", ""),
+                    "source_url": r.get("url", ""),
+                    "original_title": r.get("title", ""),
+                    "published_at": published_str,
+                    "source_language": query_info.get("source_language", "en"),
                     "_freshness_hours": freshness_hours,
                     "_tavily_images": [],
                 }
@@ -662,6 +697,10 @@ class TopicAgent(BaseAgent):
                         img_map[img] = {"url": img}
 
                 article["_tavily_images"] = list(img_map.values())
+                article["article_images"] = list(img_map.values())
+                article["_source_priority"] = (
+                    2 if query_info.get("site") in KOREAN_MEDIA_DOMAINS else 1
+                )
                 articles.append(article)
 
             # 写入缓存
@@ -790,6 +829,17 @@ class TopicAgent(BaseAgent):
 
             visible_text_raw = f"{title} {url} {search_summary}"
             visible_text = visible_text_raw.lower()
+
+            macro_keyword = next((
+                keyword for keyword in MACRO_TOPIC_KEYWORDS
+                if self._contains_topic_keyword(visible_text, keyword)
+            ), None)
+            if macro_keyword:
+                logger.info(
+                    f"[选题Agent] 🚫 过滤宏观行业/名单盘点 "
+                    f"(命中='{macro_keyword}'): {title[:80]}"
+                )
+                continue
 
             if self._is_aggregate_page(url) or any(
                 p in visible_text for p in BAD_TOPIC_PATTERNS

@@ -403,6 +403,10 @@ class ImageAgent(BaseAgent):
         if len(valid_downloaded) < min_required:
             # 仅允许一张非常高质量的新闻图作为例外，绝不以低质图凑数。
             if (
+                self.get_config(
+                    "topic_agent.image.allow_single_high_quality_image", False
+                )
+                and
                 len(valid_downloaded) == 1
                 and valid_downloaded[0].get("quality_score", 0) >= 90
             ):

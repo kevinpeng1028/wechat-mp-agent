@@ -133,6 +133,14 @@ class ScoringSystem:
                 flags=re.IGNORECASE,
             ))
 
+        if star == "Ten":
+            return bool(re.search(
+                r"(?:\bNCT\s+Ten\b|\bWayV\s+Ten\b|\bTen\s+Lee\b|"
+                r"\bChittaphon(?:\s+Leechaiyapornkul)?\b)",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
         if star == "IVE":
             # 保留大小写以排除 Jony Ive、I've、Ive-designed。
             has_name = bool(re.search(r"(?<![A-Za-z])IVE(?:'s)?(?![A-Za-z-])", text))
@@ -168,9 +176,31 @@ class ScoringSystem:
         "pre-debut", "사전데뷔",
     ]
 
+    KOREAN_MEDIA_DOMAINS = {
+        "entertain.naver.com", "osen.co.kr", "newsen.com",
+        "starnewskorea.com", "xportsnews.com", "mydaily.co.kr",
+        "dispatch.co.kr", "tenasia.hankyung.com", "sports.chosun.com",
+        "tvreport.co.kr", "mk.co.kr", "heraldpop.com", "imbc.com",
+    }
+    CONCRETE_EVENT_KEYWORDS = [
+        "comeback", "mv", "music video", "teaser", "concept photo",
+        "single", "album", "mini album", "stage", "music show",
+        "concert", "tour", "airport", "fashion week", "brand event",
+        "livestream", "live broadcast", "instagram", "social media",
+        "fans react", "netizens", "controversy", "agency response",
+        "legal action", "컴백", "뮤직비디오", "티저", "콘서트",
+        "공항", "패션위크", "브랜드", "라이브", "입장",
+    ]
+    MACRO_ANALYSIS_KEYWORDS = [
+        "generation shift", "k-pop generation", "big 4", "big four",
+        "successor list", "industry analysis", "industry trend",
+        "market outlook", "世代交替", "四大公司", "接班人",
+        "行业分析", "行业趋势", "格局分析", "名单盘点",
+    ]
+
     def __init__(self, config: Dict):
         self.config = config
-        self.scoring_cfg = config.get("topic_agent.scoring", {})
+        self.scoring_cfg = config.get("topic_agent", {}).get("scoring", {})
         self.weights = self.scoring_cfg.get("weights", {})
         self.consistency_threshold = 40  # 硬编码低阈值测试（配置读取有问题）
         self.duplicate_days = self.scoring_cfg.get("duplicate_check_days", 7)
@@ -229,6 +259,10 @@ class ScoringSystem:
             topic_heat, freshness, image_quality, image_relevance,
             article_quality, predicted_read, risk, anti_ai
         )
+        source_priority, editorial_adjustment, editorial_notes = (
+            self._score_editorial_priority(article, tavily_images)
+        )
+        total_score = max(0, min(10, total_score + editorial_adjustment))
 
         # 选中理由
         selected_reason = self._generate_reason(
@@ -250,6 +284,8 @@ class ScoringSystem:
             "image_quality_notes": image_quality_notes,
             "duplicate_check_result": duplicate_result,
             "source_urls": source_urls,
+            "source_priority_score": source_priority,
+            "editorial_priority_notes": editorial_notes,
         }
 
         logger.info(
@@ -261,6 +297,62 @@ class ScoringSystem:
         )
 
         return result
+
+    def _score_editorial_priority(
+        self, article: Dict, images: List[Dict]
+    ) -> Tuple[float, float, str]:
+        """优先韩媒、具体艺人事件和可直接使用的图片，降权宏观分析。"""
+        url = (article.get("url") or "").lower()
+        title_summary = " ".join([
+            article.get("title") or "",
+            article.get("content") or "",
+        ]).lower()
+        is_korean_media = any(domain in url for domain in self.KOREAN_MEDIA_DOMAINS)
+        has_event = any(
+            keyword in title_summary for keyword in self.CONCRETE_EVENT_KEYWORDS
+        )
+        macro_hit = next(
+            (keyword for keyword in self.MACRO_ANALYSIS_KEYWORDS
+             if keyword in title_summary),
+            None,
+        )
+        has_source_metadata = bool(
+            article.get("original_title")
+            and article.get("source_url")
+            and article.get("published_at")
+        )
+
+        adjustment = 0.0
+        notes = []
+        if is_korean_media:
+            adjustment += 1.2
+            notes.append("韩国本土媒体")
+        if len(images) >= 2:
+            adjustment += 0.6
+            notes.append(f"原文图片{len(images)}张")
+        else:
+            adjustment -= 1.0
+            notes.append("原文图片不足")
+        if has_event:
+            adjustment += 0.8
+            notes.append("具体艺人事件")
+        else:
+            adjustment -= 1.0
+            notes.append("缺少具体事件")
+        if has_source_metadata:
+            adjustment += 0.4
+            notes.append("来源元数据完整")
+        if macro_hit:
+            adjustment -= 3.0
+            notes.append(f"宏观分析:{macro_hit}")
+
+        priority = (
+            (4 if is_korean_media else 0)
+            + (3 if has_event else 0)
+            + (2 if len(images) >= 2 else 0)
+            + (1 if has_source_metadata else 0)
+        )
+        return priority, adjustment, "；".join(notes)
 
     def _score_topic_heat(self, article: Dict) -> float:
         """话题热度评分 (0-10) — 优先韩国顶流明星"""

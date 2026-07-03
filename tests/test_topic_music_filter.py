@@ -79,6 +79,9 @@ def test_short_artist_names_require_strict_kpop_context():
     assert ScoringSystem._match_star("IVE", "IVE comeback teaser")
     assert not ScoringSystem._match_star("V", "V at a generic event")
     assert ScoringSystem._match_star("V", "V of BTS at CELINE")
+    assert not ScoringSystem._match_star("Ten", "top ten trends over ten years")
+    assert ScoringSystem._match_star("Ten", "NCT Ten shares a new update")
+    assert ScoringSystem._match_star("Ten", "WayV Ten airport fashion")
 
 
 def test_keeps_enhypen_japan_single_mv_despite_body_template_words():
@@ -163,6 +166,21 @@ def test_body_only_idol_mention_does_not_qualify():
         "raw_content": "Recommended: BLACKPINK airport fashion.",
     }
     assert filter_topics(article) == []
+
+
+def test_macro_industry_topics_are_filtered_even_with_idol_names():
+    titles = [
+        "BTS and BLACKPINK lead a new K-pop generation shift",
+        "Big 4 successor list includes aespa and IVE",
+        "K-pop industry analysis: company landscape outlook",
+        "四大公司接班人名单：BTS与aespa之后是谁",
+    ]
+    for title in titles:
+        assert filter_topics({
+            "title": title,
+            "url": "https://example.com/analysis",
+            "summary": "A broad industry trend article.",
+        }) == []
 
 
 def test_single_qualified_article_is_not_padded():

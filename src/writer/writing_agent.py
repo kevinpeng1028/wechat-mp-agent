@@ -167,6 +167,12 @@ class WritingAgent(BaseAgent):
 
             # 严格检查
             check_result = self._strict_check(parsed)
+            fidelity_issues = self._check_source_fidelity(
+                parsed, source_articles
+            )
+            if fidelity_issues:
+                check_result["issues"].extend(fidelity_issues)
+                check_result["passed"] = False
             if not check_result["passed"]:
                 # 尝试修复或直接失败
                 logger.warning(
@@ -178,6 +184,12 @@ class WritingAgent(BaseAgent):
                 )
                 if parsed:
                     check_result = self._strict_check(parsed)
+                    fidelity_issues = self._check_source_fidelity(
+                        parsed, source_articles
+                    )
+                    if fidelity_issues:
+                        check_result["issues"].extend(fidelity_issues)
+                        check_result["passed"] = False
 
             if not check_result["passed"]:
                 return {
@@ -247,6 +259,7 @@ class WritingAgent(BaseAgent):
         """构建写作提示词"""
         # 构建源文章参考
         source_material = self._build_source_material(source_articles)
+        fact_points = self._extract_fact_points(source_articles)
 
         # 构建图片信息（不含具体画面描述，只提供安全信息）
         image_info = self._build_image_info(tavily_images)
@@ -268,22 +281,28 @@ class WritingAgent(BaseAgent):
 ## 源文章内容参考（可能为韩语/英语，请翻译为中文后使用）
 {source_material}
 
+## 原文事实清单（只能基于这些事实展开）
+{chr(10).join(f"- {fact}" for fact in fact_points)}
+
 ## 可用图片信息（仅用于判断图片数量，不要写具体画面）
 {image_info}
 
 ## 写作要求
 1. **语言**: 全文简体中文，韩语/英语源文必须翻译，韩国人名用中文译名
 2. **字数**: 目标约400字，理想350-500字，允许200-800字；少于200字必须补写，超过800字必须压缩，不写空话
-3. **文风**: 轻快自然的韩娱快讯。少正式新闻腔，先说谁发生了什么，再写公开看点和讨论
-4. **段落**: 多用短句，每段25-80字，手机阅读时不要出现长句堆叠
-5. **禁止口吻**: {', '.join(banned[:8])} 等饭圈表达
-6. **安全表达**: 可用 {', '.join(safe[:5])}
-7. **格式**: {"不输出Markdown标题符号" if rules.get("no_markdown_headings") else ""} {"不输出hashtag" if rules.get("no_hashtags") else ""}
-8. **事实边界**: 粉丝/网友反应只能使用源材料明确提供的内容；争议与传闻不扩写、不定性；不用“女友、调情、真实颜值、隐藏颜值、借题发挥、恋情实锤、暧昧、翻车、疑似塌房、网友怒批”
-9. **图片边界**: 未确认的服装、动作、表情、背景、构图一律不写，可用“从公开内容来看”“相关物料公开后”
-10. **标题**: 艺人名放前面，信息点明确、自然简短，不要机器翻译腔
-11. **禁用新闻稿腔**: 据悉、此外、值得注意的是、引发广泛关注、具有重要意义、展现国际影响力、从行业角度来看
-12. **结尾**: 轻轻收束，不上价值，不使用强制点赞关注类互动
+3. **忠实度**: 人名、团体、公司、时间、地点、事件性质、官方回应和争议边界必须与原文保持一致；事实内容保持85%-90%以上一致
+4. **整理范围**: 只做轻度中文资讯化整理，可调整中文表达、段落顺序和阅读节奏；不逐句翻译，也不新增事实
+5. **文风**: 轻快自然的韩娱快讯。少正式新闻腔，先说谁发生了什么，再写公开看点和讨论
+6. **段落**: 多用短句，每段25-80字，手机阅读时不要出现长句堆叠
+7. **禁止口吻**: {', '.join(banned[:8])} 等饭圈表达
+8. **安全表达**: 可用 {', '.join(safe[:5])}
+9. **格式**: {"不输出Markdown标题符号" if rules.get("no_markdown_headings") else ""} {"不输出hashtag" if rules.get("no_hashtags") else ""}
+10. **事实边界**: 原文没有网友/粉丝反应、公司回应或争议信息时，正文绝对不能自行补充
+11. **禁止宏观发挥**: 不写市场定位、公司格局、世代交替、行业趋势、全球影响力等原文没有的判断
+12. **争议边界**: 不把猜测写成事实，不扩大争议，不使用刺激性定性
+13. **图片边界**: 未确认的服装、动作、表情、背景、构图一律不写
+14. **标题**: 艺人名放前面，信息点明确、自然简短，不要机器翻译腔
+15. **结尾**: 轻轻收束，不上价值，不使用强制点赞关注类互动
 
 ## 输出格式（严格JSON）
 ```json
@@ -316,6 +335,98 @@ class WritingAgent(BaseAgent):
             )
 
         return "\n---\n".join(parts)
+
+    def _extract_fact_points(self, source_articles: List[Dict]) -> List[str]:
+        """从原题和原文摘取5-8个事实片段，作为写作边界。"""
+        points = []
+        for article in source_articles[:3]:
+            title = (article.get("original_title") or article.get("title") or "").strip()
+            if title:
+                points.append(f"原文标题：{title}")
+            content = (
+                article.get("content")
+                or article.get("raw_content")
+                or article.get("summary")
+                or ""
+            )
+            for sentence in re.split(r"(?<=[。！？.!?])\s+|\n+", content):
+                sentence = sentence.strip()
+                if 20 <= len(sentence) <= 240:
+                    points.append(sentence)
+                if len(points) >= 8:
+                    break
+            if len(points) >= 8:
+                break
+        return points[:8] or ["仅使用原文标题中明确陈述的事实"]
+
+    def _check_source_fidelity(
+        self, parsed: Dict, source_articles: List[Dict]
+    ) -> List[str]:
+        """阻止新增艺人、公司回应、网友反应和宏观行业判断。"""
+        issues = []
+        output = " ".join([
+            parsed.get("title", ""),
+            parsed.get("summary", ""),
+            parsed.get("content_text", ""),
+        ])
+        source = " ".join(
+            " ".join([
+                article.get("original_title") or article.get("title") or "",
+                article.get("content") or "",
+                article.get("raw_content") or "",
+                article.get("summary") or "",
+            ])
+            for article in source_articles
+        )
+        output_lower = output.lower()
+        source_lower = source.lower()
+
+        macro_phrases = [
+            "市场定位", "延续巨头影响力", "世代交替", "转型期阵痛",
+            "四大公司接班人", "从行业角度来看", "文化输出",
+            "全球影响力持续扩大", "行业格局", "产业趋势",
+        ]
+        for phrase in macro_phrases:
+            if phrase in output:
+                issues.append(f"新增AI宏观判断: '{phrase}'")
+
+        reaction_terms = ["网友", "粉丝", "评论区", "netizen", "fans react"]
+        if any(term in output_lower for term in reaction_terms) and not any(
+            term in source_lower for term in reaction_terms
+        ):
+            issues.append("原文未提供网友/粉丝反应，禁止自行补充")
+
+        company_terms = [
+            "hybe", "bighit", "sm entertainment", "jyp entertainment",
+            "yg entertainment", "starship", "ador", "source music",
+        ]
+        for company in company_terms:
+            if company in output_lower and company not in source_lower:
+                issues.append(f"原文未提及公司，禁止新增: {company}")
+
+        try:
+            from src.topic.scoring import ScoringSystem
+            source_people = {
+                star for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, source)
+            }
+            output_people = {
+                star for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, output)
+            }
+            for person in sorted(output_people - source_people):
+                issues.append(f"原文未提及艺人，禁止新增: {person}")
+        except Exception:
+            pass
+
+        if (
+            any(term in output for term in ["确认恋情", "证实恋情", "恋情属实"])
+            and not any(term in source_lower for term in [
+                "confirmed relationship", "确认恋情", "证实恋情", "officially confirmed"
+            ])
+        ):
+            issues.append("原文未确认恋情，禁止把猜测写成事实")
+        return issues
 
     def _build_image_info(self, tavily_images: List[Dict]) -> str:
         """构建图片信息（不含具体画面描述）"""
@@ -443,6 +554,8 @@ class WritingAgent(BaseAgent):
 5. 不要使用饭圈口吻
 6. 韩国人名用中文译名
 7. 争议内容使用中性表达，不写女友、调情、真实颜值、借题发挥、恋情实锤、暧昧、翻车或疑似塌房
+8. 严格依据以下原文事实，不新增人物、公司回应、网友反应或行业判断：
+{chr(10).join(f"- {fact}" for fact in self._extract_fact_points(source_articles))}
 
 选题: {topic.get("title", "")}
 源文章参考: {self._build_source_material(source_articles)[:500]}

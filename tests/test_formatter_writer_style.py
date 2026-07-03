@@ -70,3 +70,43 @@ def test_writer_prompt_uses_mobile_kpop_newsletter_style_without_ai_news_tone():
     assert "理想350-500字" in prompt
     assert "未确认的服装、动作、表情" in prompt
     assert "引发广泛关注" in prompt  # 明确列为禁用新闻稿腔
+    assert "原文事实清单" in prompt
+    assert "事实内容保持85%-90%以上一致" in prompt
+    assert "不新增事实" in prompt
+
+
+def test_writer_fidelity_rejects_invented_reactions_company_and_macro_analysis():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": []}}
+    source = [{
+        "title": "IVE releases comeback teaser",
+        "content": "IVE released a comeback teaser on July 3.",
+    }]
+    parsed = {
+        "title": "IVE回归预告公开",
+        "summary": "",
+        "content_text": (
+            "IVE公开了回归预告。粉丝很快在评论区热议。"
+            "HYBE随后作出回应，这也改变了行业格局。"
+        ),
+    }
+    issues = writer._check_source_fidelity(parsed, source)
+
+    assert any("网友/粉丝反应" in issue for issue in issues)
+    assert any("禁止新增: hybe" in issue for issue in issues)
+    assert any("AI宏观判断" in issue for issue in issues)
+
+
+def test_writer_fidelity_allows_reactions_only_when_source_reports_them():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": []}}
+    source = [{
+        "title": "IVE releases comeback teaser",
+        "content": "IVE released a teaser. Fans react positively to the release.",
+    }]
+    parsed = {
+        "title": "IVE回归预告公开",
+        "summary": "",
+        "content_text": "IVE公开了回归预告，原文提到粉丝也给出了积极反应。",
+    }
+    assert writer._check_source_fidelity(parsed, source) == []

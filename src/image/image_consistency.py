@@ -44,6 +44,11 @@ class ImageConsistencyChecker:
             .get("image", {})
             .get("min_images_required", 2)
         )
+        self.allow_single_high_quality_image = (
+            config.get("topic_agent", {})
+            .get("image", {})
+            .get("allow_single_high_quality_image", False)
+        )
 
     def check_consistency(
         self,
@@ -86,6 +91,8 @@ class ImageConsistencyChecker:
 
         if len(valid_images) < self.min_images_required:
             if (
+                self.allow_single_high_quality_image
+                and
                 len(valid_images) == 1
                 and valid_images[0].get("quality_score", 0) >= 90
             ):

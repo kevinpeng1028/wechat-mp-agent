@@ -63,67 +63,35 @@ trigger:
 
 # ---- 选题 Agent 配置 ----
 topic_agent:
-  # 韩国娱乐媒体搜索源（site: 搜索限定）
-  # 聚焦 TOP 5 媒体 + TOP 10 男团/女团关键词
+  # 第一层：韩国本土媒体优先（默认最多6次）
   search_sources:
-    # ---- TOP 5 韩国娱乐媒体 ----
-    - name: "Soompi"
-      site: "soompi.com"
-      lang: "en"
-      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM idol member fashion airport fans react viral dating rumor controversy brand event"
-    - name: "AllKpop"
-      site: "allkpop.com"
-      lang: "en"
-      query_suffix: "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK NewJeans aespa IVE LESSERAFIM idol member fashion airport fans react viral dating rumor controversy brand event"
-    - name: "Koreaboo"
-      site: "koreaboo.com"
-      lang: "en"
-      query_suffix: "BTS BLACKPINK NewJeans aespa IVE LESSERAFIM Stray Kids SEVENTEEN TXT idol member fashion airport netizens react viral dating rumor controversy brand event"
-    - name: "SBS Star"
-      site: "sbsstar.net"
-      lang: "en"
-      query_suffix: "BTS BLACKPINK NewJeans IVE aespa Stray Kids SEVENTEEN TXT ENHYPEN idol member fashion airport fans react viral dating rumor controversy brand event"
-    - name: "KpopStarz"
-      site: "kpopstarz.com"
-      lang: "en"
-      query_suffix: "BTS BLACKPINK aespa IVE fashion airport viral"
-    - name: "NME K-pop"
-      site: "nme.com"
-      lang: "en"
-      query_suffix: "k-pop BTS BLACKPINK aespa IVE latest"
-    - name: "Billboard K-pop"
-      site: "billboard.com"
-      lang: "en"
-      query_suffix: "k-pop BTS BLACKPINK Stray Kids NewJeans chart"
-    # Korea JoongAng Daily 暂停启用：综合新闻源会混入社会、商业和生活内容。
+    - {name: "Naver Entertainment", site: "entertain.naver.com", lang: "ko"}
+    - {name: "OSEN", site: "osen.co.kr", lang: "ko"}
+    - {name: "NewsEn", site: "newsen.com", lang: "ko"}
+    - {name: "StarNews", site: "starnewskorea.com", lang: "ko"}
+    - {name: "XportsNews", site: "xportsnews.com", lang: "ko"}
+    - {name: "MyDaily", site: "mydaily.co.kr", lang: "ko"}
 
   # 通用搜索关键词 — 已禁用（无站点限制，返回内容不精准）
   # 如需启用，在 search_sources 里追加带 site: 的源
   general_keywords: []
 
-  # 额外搜索源（默认禁用，需手动启用）
-  # 如需更多素材来源，将下方列表内容合并到 search_sources
+  # 第二层韩媒 + 第三层英文韩娱补充源
   search_sources_extra:
-    - name: "Koreaboo"
-      site: "koreaboo.com"
-      lang: "en"
-      query_suffix: "BTS BLACKPINK NewJeans K-pop idol"
-    - name: "SBS Star"
-      site: "sbsstar.net"
-      lang: "en"
-      query_suffix: "BTS BLACKPINK K-pop idol news"
-    - name: "Korea JoongAng Daily"
-      site: "koreajoongangdaily.joins.com"
-      lang: "en"
-      query_suffix: "BTS BLACKPINK K-pop idol"
-    - name: "Dispatch"
-      site: "dispatch.co.kr"
-      lang: "ko"
-      query_suffix: "BTS BLACKPINK 아이돌 사진"
-    - name: "Naver Entertainment"
-      site: "entertain.naver.com"
-      lang: "ko"
-      query_suffix: "BTS BLACKPINK 아이돌 연예"
+    - {name: "Dispatch", site: "dispatch.co.kr", lang: "ko"}
+    - {name: "TenAsia", site: "tenasia.hankyung.com", lang: "ko"}
+    - {name: "Sports Chosun", site: "sports.chosun.com", lang: "ko"}
+    - {name: "TVReport", site: "tvreport.co.kr", lang: "ko"}
+    - {name: "MK Sports / Star Today", site: "mk.co.kr", lang: "ko"}
+    - {name: "Herald POP", site: "heraldpop.com", lang: "ko"}
+    - {name: "iMBC Entertainment", site: "imbc.com", lang: "ko"}
+    - {name: "Koreaboo", site: "koreaboo.com", lang: "en"}
+    - {name: "AllKpop", site: "allkpop.com", lang: "en"}
+    - {name: "Soompi", site: "soompi.com", lang: "en"}
+    - {name: "SBS Star", site: "sbsstar.net", lang: "en"}
+    - {name: "KpopStarz", site: "kpopstarz.com", lang: "en"}
+    - {name: "NME K-pop", site: "nme.com", lang: "en"}
+    - {name: "Billboard K-pop", site: "billboard.com", lang: "en"}
 
   # 搜索参数
   search:
@@ -151,7 +119,7 @@ topic_agent:
     max_image_search_queries: 2
     require_valid_image: true
     min_images_required: 2
-    allow_single_high_quality_image: true
+    allow_single_high_quality_image: false
     min_width: 480
     min_height: 320
     min_file_size_kb: 25
@@ -234,6 +202,12 @@ writer_agent:
     - "网友怒批"
     - "调情"
     - "女友"
+    - "市场定位"
+    - "延续巨头影响力"
+    - "世代交替已经悄悄改变"
+    - "转型期阵痛"
+    - "四大公司接班人名单"
+    - "全球影响力持续扩大"
 
   # 允许的安全表达
   safe_expressions:

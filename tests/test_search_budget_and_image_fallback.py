@@ -142,6 +142,26 @@ def test_supplemental_queries_are_site_restricted():
     assert not agent._is_allowed_source_url("https://www.tmz.com/relationship-rumor")
 
 
+def test_search_tiers_put_korean_media_before_english_sites():
+    agent = object.__new__(TopicAgent)
+    agent.get_config = lambda key, default=None: default
+    tiers = agent._build_tiered_search_queries()
+
+    assert len(tiers["primary"]) == 6
+    assert all(query["source_language"] == "ko" for query in tiers["primary"])
+    assert all(
+        query["site"] in {
+            "entertain.naver.com", "osen.co.kr", "newsen.com",
+            "starnewskorea.com", "xportsnews.com", "mydaily.co.kr",
+        }
+        for query in tiers["primary"]
+    )
+    assert all(
+        query["source_language"] == "en"
+        for query in tiers["supplemental"]
+    )
+
+
 def test_credit_budget_and_hard_stop():
     agent = object.__new__(TopicAgent)
     agent.max_total_tavily_credits = 12
