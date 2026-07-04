@@ -147,6 +147,59 @@ def test_writer_alias_mapping_treats_korean_and_english_names_as_same_entity():
         assert not any("未提及艺人" in issue for issue in issues)
 
 
+def test_enhypen_member_aliases_are_bidirectional_and_reject_new_members():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": []}}
+    source = [{
+        "title": "엔하이픈 정원 제이 제이크 성훈 월드투어",
+        "content": "정원 제이 제이크 성훈이 공연에 참여했다.",
+    }]
+    allowed = {
+        "title": "ENHYPEN世界巡演",
+        "summary": "",
+        "content_text": "ENHYPEN成员Jungwon、Jay、Jake和Sunghoon参加了演出。",
+    }
+    assert writer._check_source_fidelity(allowed, source) == []
+
+    assert writer._check_source_fidelity(
+        {"title": "Jake动态", "summary": "", "content_text": "Jake参加演出。"},
+        [{"title": "제이크 공연", "content": "제이크가 공연했다."}],
+    ) == []
+
+    issues = writer._check_source_fidelity(
+        {
+            "title": "巡演动态",
+            "summary": "",
+            "content_text": "Jake、Jay、Jungwon和Sunghoon参加演出。",
+        },
+        [{"title": "ENHYPEN巡演", "content": "组合公开巡演消息。"}],
+    )
+    assert any("ENHYPEN_JAKE" in issue for issue in issues)
+    assert any("ENHYPEN_JAY" in issue for issue in issues)
+
+
+def test_alias_detection_is_per_article_and_excludes_navigation_pollution():
+    writer = object.__new__(WritingAgent)
+    first = [{
+        "title": "엔하이픈 정원 제이크 월드투어",
+        "content": "엔하이픈이 월드투어를 시작했다.",
+    }]
+    aliases, contexts = writer._detect_source_entities_with_context(first)
+    assert "ENHYPEN" in aliases
+    assert "ENHYPEN_JUNGWON" in aliases
+    assert "BTS" not in aliases
+    assert "Jungkook" not in aliases
+    assert "Jimin" not in aliases
+    assert set(contexts) <= {
+        "title", "snippet", "meta_description", "article_body_cleaned"
+    }
+
+    second = [{"title": "i-dle MV teaser", "content": "i-dle released a teaser."}]
+    second_aliases, _ = writer._detect_source_entities_with_context(second)
+    assert "BTS_JIN" not in second_aliases
+    assert "ENHYPEN" not in second_aliases
+
+
 def test_short_news_mode_accepts_191_chars_but_normal_mode_prefers_more():
     writer = object.__new__(WritingAgent)
     writer.config = {
@@ -167,3 +220,20 @@ def test_short_news_mode_accepts_191_chars_but_normal_mode_prefers_more():
 
     too_short = dict(parsed, content_text="短讯" * 50)
     assert not writer._strict_check(too_short, short_news_mode=True)["passed"]
+
+
+def test_fact_rich_article_under_250_chars_requires_rewrite():
+    writer = object.__new__(WritingAgent)
+    writer.config = {
+        "writing": {"absolute_min_chars": 160},
+        "writer_agent": {"banned_phrases": []},
+    }
+    parsed = {
+        "title": "ENHYPEN巡演",
+        "summary": "",
+        "content_text": "组合公开了巡演安排。" * 15,
+    }
+    assert len(parsed["content_text"]) < 250
+    result = writer._strict_check(parsed, short_news_mode=False)
+    assert not result["passed"]
+    assert any("250" in issue for issue in result["issues"])

@@ -141,15 +141,19 @@ class WritingAgent(BaseAgent):
         )
         topic["extracted_facts"] = fact_points
         topic["short_news_mode"] = short_news_mode
-        source_text = self._source_text(source_articles)
-        aliases = sorted(self._detect_source_entities(source_text))
+        aliases, alias_contexts = self._detect_source_entities_with_context(
+            source_articles
+        )
         logger.info(
             f"[写作Agent] 写作前事实检查 | "
             f"original_title={topic.get('original_title') or topic.get('title', '')} | "
             f"source_url={topic.get('source_url') or topic.get('url', '')} | "
             f"source_language={topic.get('source_language', 'unknown')} | "
             f"extracted_facts_count={len(fact_points)} | "
-            f"aliases_detected={aliases} | short_news_mode={short_news_mode} | "
+            f"aliases_detected={aliases} | "
+            f"aliases_source={list(alias_contexts)} | "
+            f"alias_context={alias_contexts} | "
+            f"short_news_mode={short_news_mode} | "
             f"允许写作={bool(fact_points)}"
         )
         if not fact_points:
@@ -203,7 +207,8 @@ class WritingAgent(BaseAgent):
             if not check_result["passed"]:
                 # 尝试修复或直接失败
                 logger.warning(
-                    f"[写作Agent] 严格检查未通过: {check_result['issues']}"
+                    f"[写作Agent] 严格检查未通过: {check_result['issues']} | "
+                    f"生成稿片段={parsed.get('content_text', '')[:180]}"
                 )
                 # 重新生成（简化版）
                 parsed = await self._retry_with_stricter_prompt(
@@ -220,6 +225,11 @@ class WritingAgent(BaseAgent):
                         check_result["passed"] = False
 
             if not check_result["passed"]:
+                logger.error(
+                    f"[写作Agent] 两次生成均失败 | "
+                    f"原因={check_result['issues']} | "
+                    f"重试稿片段={parsed.get('content_text', '')[:240]}"
+                )
                 return {
                     "is_success": False,
                     "error": f"严格检查未通过: {check_result['issues']}",
@@ -276,17 +286,22 @@ class WritingAgent(BaseAgent):
                         self._meta_content(page, "og:description")
                         or self._meta_content(page, "description")
                     )
+                    article_match = re.search(
+                        r"<article\b[^>]*>(.*?)</article>", page,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    article_html = article_match.group(1) if article_match else ""
                     body = " ".join(
                         html.unescape(re.sub(r"<[^>]+>", " ", block))
                         for block in re.findall(
-                            r"<p\b[^>]*>(.*?)</p>", page,
+                            r"<p\b[^>]*>(.*?)</p>", article_html,
                             flags=re.IGNORECASE | re.DOTALL,
                         )[:20]
                     )
                     body = re.sub(r"\s+", " ", body).strip()
                     article["og_title"] = og_title
                     article["meta_description"] = description
-                    if body:
+                    if body and len(body) >= 80:
                         article["article_body"] = body[:6000]
                 except Exception as exc:
                     logger.info(
@@ -476,6 +491,34 @@ class WritingAgent(BaseAgent):
         from src.topic.scoring import ScoringSystem
         return ScoringSystem.detect_artist_entities(text)
 
+    @staticmethod
+    def _detect_source_entities_with_context(source_articles: List[Dict]):
+        from src.topic.scoring import ScoringSystem
+        fields = {
+            "title": ("og_title", "original_title", "title"),
+            "snippet": ("summary", "content"),
+            "meta_description": ("meta_description",),
+            "article_body_cleaned": ("article_body",),
+        }
+        entities = set()
+        contexts = {}
+        for label, keys in fields.items():
+            text = " ".join(
+                str(article.get(key) or "")
+                for article in source_articles
+                for key in keys
+            ).strip()
+            if not text:
+                continue
+            hits = ScoringSystem.detect_artist_entities(text)
+            if hits:
+                entities.update(hits)
+                contexts[label] = {
+                    "aliases": sorted(hits),
+                    "context": text[:180],
+                }
+        return sorted(entities), contexts
+
     def _check_source_fidelity(
         self, parsed: Dict, source_articles: List[Dict]
     ) -> List[str]:
@@ -598,7 +641,7 @@ class WritingAgent(BaseAgent):
         # 检查字数
         char_count = len(content.replace(" ", "").replace("\n", ""))
         absolute_min = self.get_config("writing.absolute_min_chars", 160)
-        effective_min = absolute_min if short_news_mode else 200
+        effective_min = absolute_min if short_news_mode else 250
         ideal_max = self.get_config("writing.ideal_max_chars", 500)
         short_max = self.get_config("writing.short_news_mode_max_chars", 300)
         if char_count < effective_min:
@@ -668,13 +711,14 @@ class WritingAgent(BaseAgent):
 请重新生成，特别注意:
 1. 所有内容必须是简体中文，韩语/英语必须完全翻译
 2. 绝对不要出现上述问题
-3. {"当前是事实有限的短讯模式，允许160-300字，不为凑400字补写" if short_news_mode else "事实充分时目标350-500字"}；忠实优先
+3. {"当前是事实有限的短讯模式，允许160-300字，不为凑400字补写" if short_news_mode else "事实点不少于5个，必须逐点展开到300-500字，低于250字不合格"}；忠实优先
 4. 不要写任何具体图片画面细节
 5. 不要使用饭圈口吻
 6. 韩国人名用中文译名
 7. 争议内容使用中性表达，不写女友、调情、真实颜值、借题发挥、恋情实锤、暧昧、翻车或疑似塌房
 8. 严格依据以下原文事实，不新增人物、公司回应、网友反应或行业判断：
 {chr(10).join(f"- {fact}" for fact in self._extract_fact_points(source_articles))}
+9. 逐条利用上述事实扩展中文表达；禁止写粉丝热议、网友期待、评论区热闹，除非事实清单明确包含
 
 选题: {topic.get("title", "")}
 源文章参考: {self._build_source_material(source_articles)[:500]}

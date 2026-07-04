@@ -127,6 +127,71 @@ def test_korean_han_and_daesung_require_explicit_artist_context():
     assert ScoringSystem._match_star("한", "스트레이키즈 한 신곡")
 
 
+def test_enhypen_aliases_work_in_idol_and_top_star_filters():
+    articles = [{
+        "title": "엔하이픈 정원 제이 제이크 성훈 월드투어 출발",
+        "url": "https://starnewskorea.com/article/123",
+        "summary": "멤버들이 콘서트 일정을 시작했다.",
+    }]
+    agent = object.__new__(TopicAgent)
+    assert agent._filter_idol_centric_topics(articles) == articles
+    assert agent._filter_top_stars(articles) == articles
+    full_name_article = [{
+        "title": "양정원 심재윤 박종성 박성훈 콘서트 출발",
+        "url": "https://starnewskorea.com/article/456",
+        "summary": "엔하이픈 멤버 월드투어",
+    }]
+    assert agent._filter_idol_centric_topics(full_name_article) == full_name_article
+    assert agent._filter_top_stars(full_name_article) == full_name_article
+
+
+def test_topic_preflight_requires_two_safe_image_urls():
+    agent = object.__new__(TopicAgent)
+    base = {
+        "title": "IVE comeback teaser",
+        "url": "https://osen.co.kr/article/1",
+        "source_url": "https://osen.co.kr/article/1",
+        "content": "IVE released a comeback teaser today.",
+    }
+    one = dict(base, _tavily_images=[{"url": "https://cdn.test/one.jpg"}])
+    assert agent._preflight_article(one)[0] is False
+
+    blocked = dict(base, _tavily_images=[
+        {"url": "https://cdn.test/logo.png"},
+        {"url": "https://cdn.test/placeholder_icon.png"},
+    ])
+    assert agent._preflight_article(blocked)[0] is False
+
+    allkpop = dict(base, url="https://allkpop.com/article/1",
+                  source_url="https://allkpop.com/article/1",
+                  _tavily_images=[
+                      {"url": "https://www.allkpop.com/upload/one.jpg"},
+                      {"url": "https://www.allkpop.com/upload/xwhite30.png"},
+                  ])
+    assert agent._preflight_article(allkpop)[0] is False
+
+    valid = dict(base, _tavily_images=[
+        {"url": "https://cdn.test/one.jpg"},
+        {"url": "https://cdn.test/two.jpg"},
+    ])
+    assert agent._preflight_article(valid)[0] is True
+
+
+def test_collect_ready_never_bypasses_preflight():
+    agent = object.__new__(TopicAgent)
+    agent.scoring = type("ReadyScoring", (), {
+        "is_ready_for_draft": staticmethod(lambda scores: (True, "ok"))
+    })()
+    candidate = {
+        "title": "IVE comeback",
+        "url": "https://osen.co.kr/article/1",
+        "content": "IVE comeback details.",
+        "_tavily_images": [{"url": "https://cdn.test/only.jpg"}],
+        "scores": {},
+    }
+    assert agent._collect_ready([candidate]) == []
+
+
 def test_keeps_enhypen_japan_single_mv_despite_body_template_words():
     article = {
         "title": "ENHYPEN brings warmth and hope in new Japan single "

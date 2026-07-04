@@ -334,12 +334,20 @@ class TopicAgent(BaseAgent):
         fresh_candidates = self._filter_top_stars(fresh_candidates)
         logger.info(f"[选题Agent] 顶流明星过滤后: {len(fresh_candidates)} 篇")
 
-        if not fresh_candidates:
-            return AgentResult(
-                status=AgentStatus.FAILED,
-                agent_name=self.name,
-                error="未找到涉及目标韩国男团、女团或成员的候选文章",
-            )
+        preflight_candidates = []
+        for article in fresh_candidates:
+            passed, reason = self._preflight_article(article)
+            if passed:
+                preflight_candidates.append(article)
+            else:
+                logger.info(
+                    f"[选题Agent] 🚫 preflight失败: "
+                    f"{article.get('title', '')[:60]} | {reason}"
+                )
+        fresh_candidates = preflight_candidates
+        logger.info(
+            f"[选题Agent] after_preflight={len(fresh_candidates)}"
+        )
 
         # Step 3: 综合评分（15个字段）
         scored = await self._score_candidates(fresh_candidates)
@@ -454,6 +462,13 @@ class TopicAgent(BaseAgent):
     def _collect_ready(self, scored: List[Dict]) -> List[Dict]:
         ready = []
         for article in scored:
+            preflight_ok, preflight_reason = self._preflight_article(article)
+            if not preflight_ok:
+                logger.info(
+                    f"[选题Agent] ❌ 不满足ready/preflight: "
+                    f"{article.get('title', '?')[:40]} | {preflight_reason}"
+                )
+                continue
             is_ready, reason = self.scoring.is_ready_for_draft(
                 article.get("scores", {})
             )
@@ -470,7 +485,51 @@ class TopicAgent(BaseAgent):
         with_images = [item for item in candidates if item.get("_tavily_images")]
         fresh = self._filter_freshness(with_images)
         idol = self._filter_idol_centric_topics(fresh)
-        return self._filter_top_stars(idol)
+        top_stars = self._filter_top_stars(idol)
+        return [
+            article for article in top_stars
+            if self._preflight_article(article)[0]
+        ]
+
+    @staticmethod
+    def _image_url_candidates(article: Dict) -> List[str]:
+        urls = []
+        for image in article.get("_tavily_images", []) or []:
+            url = image.get("url", "") if isinstance(image, dict) else str(image)
+            if url and url not in urls and not _is_blocked_image_url(url):
+                urls.append(url)
+        return urls
+
+    def _preflight_article(self, article: Dict) -> Tuple[bool, str]:
+        """评分前轻量检查来源、事实支撑和图片 URL 风险。"""
+        source_url = article.get("source_url") or article.get("url")
+        if not source_url:
+            return False, "缺少 source_url"
+        visible = " ".join([
+            article.get("original_title") or article.get("title") or "",
+            article.get("summary") or article.get("description") or "",
+            article.get("content") or "",
+        ]).strip()
+        fact_fragments = [
+            item.strip() for item in re.split(r"[\n。！？.!?]+", visible)
+            if len(item.strip()) >= 8
+        ]
+        if not fact_fragments:
+            return False, "title/snippet 不足以提取事实"
+        image_urls = self._image_url_candidates(article)
+        article["valid_image_url_candidates"] = len(image_urls)
+        if len(image_urls) < 2:
+            return False, f"有效图片URL不足: {len(image_urls)} < 2"
+        allkpop_urls = [
+            url for url in image_urls
+            if "allkpop.com/upload" in url.lower()
+        ]
+        article["image_risk_high"] = (
+            bool(allkpop_urls) and len(allkpop_urls) == len(image_urls)
+        )
+        if article["image_risk_high"]:
+            return False, "图片均来自 AllKpop upload，高403风险且无备用图"
+        return True, "preflight通过"
 
     # ==================== Tavily 搜索 ====================
 
@@ -500,7 +559,7 @@ class TopicAgent(BaseAgent):
         metrics = self._candidate_metrics(all_results)
         need_more = (
             metrics["raw"] < getattr(self, "min_raw_before_supplement", 3)
-            or metrics["quality"]
+            or metrics["preflight"]
             < getattr(self, "min_quality_before_supplement", 2)
         )
         self._log_phase_metrics("Phase 1 韩媒精准", all_results, 0, need_more)
@@ -513,7 +572,7 @@ class TopicAgent(BaseAgent):
         metrics = self._candidate_metrics(all_results)
         need_english = (
             metrics["raw"] < getattr(self, "raw_candidate_target", 6)
-            or metrics["quality"]
+            or metrics["preflight"]
             < getattr(self, "quality_candidate_target", 3)
         )
         self._log_phase_metrics(
@@ -531,7 +590,7 @@ class TopicAgent(BaseAgent):
         self._log_phase_metrics(
             "Phase 3 英文韩娱 fallback", all_results, 0,
             metrics["raw"] < getattr(self, "min_raw_before_supplement", 3)
-            or metrics["quality"]
+            or metrics["preflight"]
             < getattr(self, "min_quality_before_supplement", 2),
         )
 
@@ -583,12 +642,17 @@ class TopicAgent(BaseAgent):
             article for article in idol
             if not self.scoring._check_duplicate(article).get("is_duplicate")
         ]
+        preflight = [
+            article for article in non_duplicate
+            if self._preflight_article(article)[0]
+        ]
         return {
             "raw": len(candidates),
             "images": len(with_images),
             "idol": len(idol),
             "duplicates": len(idol) - len(non_duplicate),
             "quality": len(non_duplicate),
+            "preflight": len(preflight),
         }
 
     def _log_phase_metrics(
@@ -599,7 +663,8 @@ class TopicAgent(BaseAgent):
         logger.info(
             f"[选题Agent] {phase} | raw={metrics['raw']} | "
             f"after_image={metrics['images']} | after_idol={metrics['idol']} | "
-            f"after_duplicate={metrics['quality']} | ready={ready_count} | "
+            f"after_duplicate={metrics['quality']} | "
+            f"after_preflight={metrics['preflight']} | ready={ready_count} | "
             f"进入下一 phase={enter_next}"
         )
 
@@ -1012,6 +1077,9 @@ class TopicAgent(BaseAgent):
                 if ScoringSystem._match_star(star, visible_text_raw)
             ]
             target_hits.extend(
+                ScoringSystem.detect_artist_entities(visible_text_raw)
+            )
+            target_hits.extend(
                 alias for alias in IDOL_TARGET_ALIASES
                 if self._match_target_alias(alias, visible_text)
             )
@@ -1106,6 +1174,9 @@ class TopicAgent(BaseAgent):
             for star in ScoringSystem.TOP_STARS:
                 if ScoringSystem._match_star(star, visible_text):
                     visible_star_hits.append(star)
+            visible_star_hits.extend(
+                ScoringSystem.detect_artist_entities(visible_text)
+            )
             visible_star_hits.extend(
                 alias for alias in IDOL_TARGET_ALIASES
                 if self._match_target_alias(alias, visible_text.lower())

@@ -156,7 +156,10 @@ class WeChatMPOrchestrator:
                 max_attempts=max_attempts,
                 target_count=self.config.get("topic_agent.search.selected_count", 2),
             )
-            for result in fallback_results:
+            report["candidate_attempts"] = getattr(
+                self, "_last_candidate_attempts", []
+            )
+            for result in self._aggregate_fallback_results():
                 report["steps"].append(self._result_to_dict(result))
 
             if not written:
@@ -314,6 +317,7 @@ class WeChatMPOrchestrator:
         results = []
         attempted = candidates[:max_attempts]
         failure_counts = {"writing": 0, "image": 0, "formatting": 0}
+        candidate_attempts = []
 
         for index, topic in enumerate(attempted, start=1):
             title = topic.get("title", "?")
@@ -328,6 +332,12 @@ class WeChatMPOrchestrator:
                 failure_counts["writing"] += 1
                 topic["write_failed"] = True
                 topic["write_failure_reason"] = writer_result.error
+                candidate_attempts.append({
+                    "topic_title": title,
+                    "write_status": "failed",
+                    "image_status": "not_run",
+                    "failure_reason": writer_result.error or "写作失败",
+                })
                 logger.warning(f"[编排器] 写作失败，切换下一篇: {title[:80]}")
                 continue
 
@@ -336,6 +346,12 @@ class WeChatMPOrchestrator:
                 failure_counts["writing"] += 1
                 topic["write_failed"] = True
                 topic["write_failure_reason"] = "写作结果缺少文章内容"
+                candidate_attempts.append({
+                    "topic_title": title,
+                    "write_status": "failed",
+                    "image_status": "not_run",
+                    "failure_reason": "写作结果缺少文章内容",
+                })
                 continue
             image_ctx = dict(ctx)
             image_ctx["tavily_images"] = article.get("tavily_images", [])
@@ -356,6 +372,12 @@ class WeChatMPOrchestrator:
                     f"[编排器] 图片失败: {title[:80]} | "
                     f"{topic['image_failure_reason']} | 切换下一篇"
                 )
+                candidate_attempts.append({
+                    "topic_title": title,
+                    "write_status": "success",
+                    "image_status": "failed",
+                    "failure_reason": topic["image_failure_reason"],
+                })
                 continue
 
             position = "headline" if not successful_articles else "sub_headline"
@@ -363,6 +385,12 @@ class WeChatMPOrchestrator:
             article["topic_info"]["position"] = position
             successful_articles.append(article)
             successful_images.extend(images)
+            candidate_attempts.append({
+                "topic_title": title,
+                "write_status": "success",
+                "image_status": "success",
+                "failure_reason": "",
+            })
             logger.info(
                 f"[编排器] ✅ 图文通过: {title[:80]} | 图片 {len(images)} 张"
             )
@@ -370,7 +398,61 @@ class WeChatMPOrchestrator:
                 break
 
         self._last_fallback_failures = failure_counts
+        self._last_candidate_attempts = candidate_attempts
         return successful_articles, successful_images, results
+
+    def _aggregate_fallback_results(self) -> List[AgentResult]:
+        attempts = getattr(self, "_last_candidate_attempts", [])
+        write_success = sum(
+            item.get("write_status") == "success" for item in attempts
+        )
+        write_failed = sum(
+            item.get("write_status") == "failed" for item in attempts
+        )
+        image_success = sum(
+            item.get("image_status") == "success" for item in attempts
+        )
+        image_failed = sum(
+            item.get("image_status") == "failed" for item in attempts
+        )
+        writing_status = (
+            AgentStatus.PARTIAL if write_success and write_failed
+            else AgentStatus.SUCCESS if write_success
+            else AgentStatus.FAILED
+        )
+        image_status = (
+            AgentStatus.PARTIAL if image_success and image_failed
+            else AgentStatus.SUCCESS if image_success
+            else AgentStatus.FAILED
+        )
+        results = [
+            AgentResult(
+                status=writing_status,
+                agent_name="writer_agent",
+                output={"success": write_success, "failed": write_failed},
+                error=(
+                    "部分候选写作失败，已切换下一篇"
+                    if writing_status == AgentStatus.PARTIAL
+                    else "所有候选写作均失败"
+                    if writing_status == AgentStatus.FAILED
+                    else None
+                ),
+            )
+        ]
+        if image_success or image_failed:
+            results.append(AgentResult(
+                status=image_status,
+                agent_name="image_agent",
+                output={"success": image_success, "failed": image_failed},
+                error=(
+                    "部分候选图片失败"
+                    if image_status == AgentStatus.PARTIAL
+                    else "所有已写文章图片均失败"
+                    if image_status == AgentStatus.FAILED
+                    else None
+                ),
+            ))
+        return results
 
     @staticmethod
     def _fallback_failure_outcome(

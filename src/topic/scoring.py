@@ -114,7 +114,7 @@ class ScoringSystem:
     ARTIST_ENTITY_ALIASES = {
         "BTS": ["BTS", "방탄소년단", "防弹少年团", "防弹", "Bangtan"],
         "BTS_JIN": [
-            "BTS Jin", "방탄소년단 진", "Jin", "진", "김석진",
+            "BTS Jin", "방탄소년단 진", "김석진",
             "Kim Seokjin", "金硕珍",
         ],
         "IVE": ["IVE", "아이브", "アイヴ", "爱芙"],
@@ -129,6 +129,14 @@ class ScoringSystem:
             "BIGBANG Daesung", "BIGBANG 대성", "빅뱅 대성",
             "Daesung", "Kang Daesung", "강대성",
         ],
+        "ENHYPEN": ["ENHYPEN", "엔하이픈"],
+        "ENHYPEN_JUNGWON": ["Jungwon", "정원", "양정원", "Yang Jungwon"],
+        "ENHYPEN_HEESEUNG": ["Heeseung", "희승", "이희승", "Lee Heeseung"],
+        "ENHYPEN_JAY": ["Jay", "제이", "박종성", "Park Jongseong"],
+        "ENHYPEN_JAKE": ["Jake", "제이크", "심재윤", "Sim Jaeyun"],
+        "ENHYPEN_SUNGHOON": ["Sunghoon", "성훈", "박성훈", "Park Sunghoon"],
+        "ENHYPEN_SUNOO": ["Sunoo", "선우", "김선우", "Kim Sunoo"],
+        "ENHYPEN_NIKI": ["Ni-ki", "Niki", "니키", "西村力"],
     }
 
     @classmethod
@@ -144,6 +152,11 @@ class ScoringSystem:
             if any(cls._match_star(alias, text) for alias in aliases):
                 entities.add(entity)
         for star in cls.TOP_STARS:
+            if (
+                "BTS_JIN" in entities
+                and star in {"Jin", "진"}
+            ):
+                continue
             if (
                 star.casefold() not in mapped_aliases
                 and cls._match_star(star, text)

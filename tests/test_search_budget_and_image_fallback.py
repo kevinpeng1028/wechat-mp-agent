@@ -414,6 +414,48 @@ def test_failure_outcome_distinguishes_writing_from_image_failures():
     assert "图片均失败" in message
 
 
+def test_report_aggregation_marks_partial_writing_then_failed_image():
+    WeChatMPOrchestrator = _orchestrator_class()
+    orchestrator = object.__new__(WeChatMPOrchestrator)
+    orchestrator._last_candidate_attempts = [
+        {
+            "topic_title": "first", "write_status": "failed",
+            "image_status": "not_run", "failure_reason": "write error",
+        },
+        {
+            "topic_title": "second", "write_status": "success",
+            "image_status": "failed", "failure_reason": "403",
+        },
+    ]
+    aggregated = orchestrator._aggregate_fallback_results()
+    assert aggregated[0].agent_name == "writer_agent"
+    assert aggregated[0].status == AgentStatus.PARTIAL
+    assert aggregated[1].agent_name == "image_agent"
+    assert aggregated[1].status == AgentStatus.FAILED
+    status, _ = orchestrator._fallback_failure_outcome(
+        {"writing": 1, "image": 1}, 2
+    )
+    assert status == "failed_at_image"
+
+
+def test_report_aggregation_all_writing_failed_has_no_image_failure():
+    WeChatMPOrchestrator = _orchestrator_class()
+    orchestrator = object.__new__(WeChatMPOrchestrator)
+    orchestrator._last_candidate_attempts = [
+        {
+            "topic_title": "first", "write_status": "failed",
+            "image_status": "not_run", "failure_reason": "write error",
+        },
+    ]
+    aggregated = orchestrator._aggregate_fallback_results()
+    assert len(aggregated) == 1
+    assert aggregated[0].status == AgentStatus.FAILED
+    status, _ = orchestrator._fallback_failure_outcome(
+        {"writing": 1, "image": 0}, 1
+    )
+    assert status == "failed_at_writing"
+
+
 def test_two_image_failures_continue_to_third_candidate():
     WeChatMPOrchestrator = _orchestrator_class()
     orchestrator = object.__new__(WeChatMPOrchestrator)
