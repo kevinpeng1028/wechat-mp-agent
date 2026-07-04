@@ -104,6 +104,7 @@ def test_tiered_search_respects_total_budget():
     agent._actual_tavily_calls = 0
     agent._core_tavily_calls = 0
     agent._extra_tavily_calls = 0
+    agent._emergency_tavily_calls = 0
     agent._cache_hits = 0
     agent.max_total_tavily_credits = 12
     agent._tavily_budget = {"credits": 0, "hard_stop_triggered": False}
@@ -118,6 +119,8 @@ def test_tiered_search_respects_total_budget():
         agent._actual_tavily_calls += 1
         if query["budget_purpose"] == "core":
             agent._core_tavily_calls += 1
+        elif query["budget_purpose"] == "emergency":
+            agent._emergency_tavily_calls += 1
         else:
             agent._extra_tavily_calls += 1
         return []
@@ -128,10 +131,11 @@ def test_tiered_search_respects_total_budget():
     assert results == []
     assert agent._core_tavily_calls <= 6
     assert agent._extra_tavily_calls <= 4
-    assert agent._actual_tavily_calls <= 10
+    assert agent._actual_tavily_calls <= 16
     assert agent._core_tavily_calls == 6
     # Phase 4 is intentionally reserved until ready candidates are known.
-    assert agent._extra_tavily_calls == 2
+    assert agent._extra_tavily_calls == 4
+    assert agent._emergency_tavily_calls == 6
 
 
 def test_supplemental_queries_are_site_restricted():
@@ -180,6 +184,7 @@ def test_search_phases_expand_when_raw_and_quality_are_low():
     agent._actual_tavily_calls = 0
     agent._core_tavily_calls = 0
     agent._extra_tavily_calls = 0
+    agent._emergency_tavily_calls = 0
     agent._cache_hits = 0
     agent._tavily_budget = {"credits": 0, "hard_stop_triggered": False}
     agent._seen_search_urls = set()
@@ -194,6 +199,8 @@ def test_search_phases_expand_when_raw_and_quality_are_low():
         called_sources.append(query["source_name"])
         if query["budget_purpose"] == "core":
             agent._core_tavily_calls += 1
+        elif query["budget_purpose"] == "emergency":
+            agent._emergency_tavily_calls += 1
         else:
             agent._extra_tavily_calls += 1
         return []
@@ -208,6 +215,7 @@ def test_search_phases_expand_when_raw_and_quality_are_low():
         "StarNews", "XportsNews", "MyDaily"
     ]
     assert called_sources[6:8] == ["Koreaboo", "AllKpop"]
+    assert agent._emergency_tavily_calls == 6
 
 
 def test_phase4_uses_reserved_extra_budget_after_duplicate_ready_failure():
@@ -283,6 +291,43 @@ def test_credit_budget_and_hard_stop():
     agent.hard_stop_tavily_credits = 13
     assert not agent._reserve_tavily_credits(2)
     assert agent._tavily_budget["hard_stop_triggered"] is True
+
+
+def test_emergency_search_can_use_hard_stop_budget_but_not_exceed_it():
+    agent = object.__new__(TopicAgent)
+    agent.max_total_tavily_credits = 12
+    agent.hard_stop_tavily_credits = 20
+    agent.absolute_max_tavily_credits = 50
+    agent._tavily_budget = {"credits": 12, "hard_stop_triggered": False}
+    agent._emergency_search_active = True
+
+    assert all(agent._reserve_tavily_credits(1) for _ in range(8))
+    assert agent._tavily_budget["credits"] == 20
+    assert not agent._reserve_tavily_credits(1)
+    assert agent._tavily_budget["hard_stop_triggered"] is True
+
+
+def test_phase5_emergency_uses_broad_whitelisted_queries():
+    agent = object.__new__(TopicAgent)
+    agent._extra_tavily_calls = 4
+    agent._seen_search_urls = set()
+    agent.freshness_hours = 24
+    agent.get_config = lambda key, default=None: default
+    calls = []
+
+    async def fake_search(query):
+        calls.append(query)
+        agent._extra_tavily_calls += 1
+        return []
+
+    agent._tavily_search = fake_search
+    asyncio.run(agent._search_phase5_emergency())
+
+    assert len(calls) == 6
+    assert all(query["budget_purpose"] == "emergency" for query in calls)
+    assert {query["site"] for query in calls} == {
+        "koreaboo.com", "allkpop.com", "soompi.com"
+    }
 
 
 class _ImageSearchResponse:

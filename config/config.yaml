@@ -11,6 +11,15 @@ app:
   log_level: "INFO"
   timezone: "Asia/Shanghai"
 
+# ---- 生产选题救援 ----
+topic:
+  min_final_topics: 1
+  target_final_topics: 2
+  production_rescue_enabled: true
+  allow_soft_ready_candidates: true
+  emergency_broad_search_enabled: true
+  emergency_max_tavily_credits: 20
+
 # ---- LLM 配置 ----
 llm:
   provider: "openai"

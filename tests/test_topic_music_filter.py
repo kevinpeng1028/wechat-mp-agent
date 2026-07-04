@@ -86,7 +86,6 @@ def test_short_artist_names_require_strict_kpop_context():
 
 def test_korean_han_and_daesung_require_explicit_artist_context():
     rejected = [
-        "ITZY는 역시 믿지..가오슝 아레나 찢은 월드투어 대성황",
         "지역 사업 대성공 소식",
         "한 사람 한 번 한국 한류 이야기",
         "'다양한 체험과 공연을 함께 즐기다'…'배그' 국가대항전 "
@@ -111,6 +110,7 @@ def test_korean_han_and_daesung_require_explicit_artist_context():
         "IVE music show stage",
         "있지 월드투어 성황",
         "ITZY world tour concert",
+        "ITZY는 역시 믿지..가오슝 아레나 찢은 월드투어 대성황",
         "여자아이들 신곡 컴백",
         "아이들 걸그룹 콘서트",
     ]
@@ -143,6 +143,55 @@ def test_enhypen_aliases_work_in_idol_and_top_star_filters():
     }]
     assert agent._filter_idol_centric_topics(full_name_article) == full_name_article
     assert agent._filter_top_stars(full_name_article) == full_name_article
+
+
+def test_korean_group_particles_and_spacing_variants_are_not_killed():
+    agent = object.__new__(TopicAgent)
+    samples = [
+        ("스트레이 키즈, 新 월드투어 서울 총 5회 공연 all 매진 [공식]",
+         "https://osen.co.kr/article/1"),
+        ("ITZY는 역시 믿지..가오슝 아레나 찢은 월드투어 대성황",
+         "https://xportsnews.com/article/2"),
+        ("키스오브라이프 핫 걸들의 공항 런웨이",
+         "https://mydaily.co.kr/page/view/20260704/3"),
+        ("엔하이픈, WORLD TOUR 'BLOOD SAGA'출발! [★영상]",
+         "https://starnewskorea.com/article/4"),
+        ("도쿄돔 장악하더니..아이브, 日 TBS 음악방송까지 출격",
+         "https://newsen.com/news/5"),
+    ]
+    articles = [
+        {"title": title, "url": url, "summary": ""}
+        for title, url in samples
+    ]
+    assert agent._filter_idol_centric_topics(articles) == articles
+    assert agent._filter_top_stars(articles) == articles
+    assert not agent._is_aggregate_page(
+        "https://mydaily.co.kr/page/view/20260704/3"
+    )
+
+
+def test_production_rescue_accepts_soft_ready_but_not_hard_reject():
+    agent = object.__new__(TopicAgent)
+    agent.selected_count = 2
+    agent.get_config = lambda key, default=None: default
+    agent.scoring = type("DuplicateScoring", (), {
+        "_check_duplicate": staticmethod(lambda article: {"is_duplicate": False})
+    })()
+    soft = {
+        "title": "KISS OF LIFE airport departure",
+        "url": "https://mydaily.co.kr/page/view/1",
+        "content": "KISS OF LIFE departed for an overseas schedule.",
+        "_tavily_images": [{"url": "https://cdn.test/one.jpg"}],
+        "scores": {"topic_heat_score": 7, "risk_score": 8},
+    }
+    hard = {
+        "title": "PUBG PNC e-sports tournament",
+        "url": "https://xportsnews.com/article/2",
+        "content": "PUBG tournament.",
+        "_tavily_images": [{"url": "https://cdn.test/one.jpg"}],
+        "scores": {"topic_heat_score": 9, "risk_score": 9},
+    }
+    assert agent._collect_soft_ready([soft, hard]) == [soft]
 
 
 def test_topic_preflight_requires_two_safe_image_urls():

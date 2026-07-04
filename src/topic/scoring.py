@@ -137,6 +137,30 @@ class ScoringSystem:
         "ENHYPEN_SUNGHOON": ["Sunghoon", "성훈", "박성훈", "Park Sunghoon"],
         "ENHYPEN_SUNOO": ["Sunoo", "선우", "김선우", "Kim Sunoo"],
         "ENHYPEN_NIKI": ["Ni-ki", "Niki", "니키", "西村力"],
+        "STRAY_KIDS": [
+            "Stray Kids", "SKZ", "스트레이키즈", "스트레이 키즈", "스키즈",
+        ],
+        "KISS_OF_LIFE": [
+            "KISS OF LIFE", "KIOF", "키스오브라이프", "키스 오브 라이프",
+        ],
+        "LE_SSERAFIM": ["LE SSERAFIM", "르세라핌"],
+        "AESPA": ["aespa", "에스파"],
+        "BLACKPINK": ["BLACKPINK", "블랙핑크"],
+        "NMIXX": ["NMIXX", "엔믹스"],
+        "ZEROBASEONE": ["ZEROBASEONE", "ZB1", "제로베이스원"],
+        "BOYNEXTDOOR": ["BOYNEXTDOOR", "보이넥스트도어"],
+        "ATEEZ": ["ATEEZ", "에이티즈"],
+        "THE_BOYZ": ["THE BOYZ", "더보이즈"],
+        "TREASURE": ["TREASURE", "트레저"],
+        "82MAJOR": ["82MAJOR", "82메이저"],
+        "CRAVITY": ["CRAVITY", "크래비티"],
+        "P1HARMONY": ["P1Harmony", "피원하모니"],
+        "TWS": ["TWS", "투어스"],
+        "ILLIT": ["ILLIT", "아일릿"],
+        "KATSEYE": ["KATSEYE", "캣츠아이"],
+        "MEOVV": ["MEOVV", "미야오"],
+        "CORTIS": ["CORTIS", "코르티스"],
+        "ALLDAY_PROJECT": ["ALLDAY PROJECT", "올데이 프로젝트"],
     }
 
     @classmethod
@@ -176,7 +200,8 @@ class ScoringSystem:
             r"teaser|album|concert|fans?|netizens?|airport|fashion week|"
             r"music show|member|wonyoung|yujin|gaeul|\brei\b|\bliz\b|leeseo|"
             r"taehyung|jungkook|jimin|suga|\bjin\b|jennie|lisa|karina|"
-            r"回归|组合|成员|巡演|演唱会|音乐节目|爱豆"
+            r"回归|组合|成员|巡演|演唱会|音乐节目|爱豆|"
+            r"월드투어|공연|매진|공항|출국|입국|음악방송|콘서트"
         )
 
         if star == "V":
@@ -244,9 +269,10 @@ class ScoringSystem:
             )
             return bool(re.search(pattern, text_lower))
 
-        # 韩文名必须是完整词，避免 대성황→대성 等普通词子串误判。
+        # 韩文名允许常见助词，但不能匹配普通词内部。
+        particles = r"(?:은|는|이|가|을|를|의|도|과|와|로|으로)?"
         return bool(re.search(
-            rf"(?<![가-힣]){re.escape(star)}(?![가-힣])", text
+            rf"(?<![가-힣]){re.escape(star)}{particles}(?![가-힣])", text
         ))
 
     # 明确排除的低热度关键词（出现这些的文章降分）
@@ -279,6 +305,12 @@ class ScoringSystem:
         "pubg", "pnc", "e스포츠", "이스포츠", "배그", "국가대항전",
         "크래프톤", "덕지순례", "게임", "선수", "경기", "대회",
     ]
+    APPROVED_GROUP_ENTITIES = {
+        "KISS_OF_LIFE", "NMIXX", "ZEROBASEONE", "BOYNEXTDOOR", "NCT",
+        "ATEEZ", "THE_BOYZ", "TREASURE", "82MAJOR", "CRAVITY",
+        "P1HARMONY", "TWS", "ILLIT", "KATSEYE", "MEOVV", "CORTIS",
+        "ALLDAY_PROJECT",
+    }
     MACRO_ANALYSIS_KEYWORDS = [
         "generation shift", "k-pop generation", "big 4", "big four",
         "successor list", "industry analysis", "industry trend",
@@ -481,6 +513,16 @@ class ScoringSystem:
                 score += 0.8  # 内容中出现 = 可能只是提及
 
         total_hits = title_hits + content_hits
+        approved_hits = (
+            self.detect_artist_entities(title) & self.APPROVED_GROUP_ENTITIES
+        )
+        if approved_hits and title_hits == 0:
+            title_hits += 1
+            total_hits += 1
+            score += 2.5
+            logger.info(
+                f"[评分] 备用K-pop组合命中: {sorted(approved_hits)}"
+            )
         if total_hits > 0:
             logger.info(
                 f"[评分] 🔥 顶流明星命中: 标题{title_hits} 内容{content_hits} | "

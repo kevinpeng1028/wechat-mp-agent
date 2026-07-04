@@ -143,6 +143,19 @@ ESPORTS_GAME_KEYWORDS = [
     "게임", "크래프톤", "덕지순례", "선수", "경기", "대회",
 ]
 
+TARGET_TOP_STAR_ENTITIES = {
+    "BTS", "BLACKPINK", "AESPA", "IVE", "NewJeans", "LE_SSERAFIM",
+    "IDLE", "STRAY_KIDS", "SEVENTEEN", "ENHYPEN", "TXT", "TWICE",
+    "ITZY", "BABYMONSTER", "RIIZE",
+}
+
+APPROVED_KPOP_GROUP_ENTITIES = {
+    "KISS_OF_LIFE", "NMIXX", "ZEROBASEONE", "BOYNEXTDOOR", "NCT",
+    "ATEEZ", "THE_BOYZ", "TREASURE", "82MAJOR", "CRAVITY",
+    "P1HARMONY", "TWS", "ILLIT", "KATSEYE", "MEOVV", "CORTIS",
+    "ALLDAY_PROJECT",
+}
+
 BAD_TOPIC_PATTERNS = [
     "artist tag", "all kpop all the time", "tag -",
 ]
@@ -224,6 +237,7 @@ class TopicAgent(BaseAgent):
         self._cache_hits = 0
         self._core_tavily_calls = 0
         self._extra_tavily_calls = 0
+        self._emergency_tavily_calls = 0
         self._tavily_budget = {
             "calls": 0,
             "credits": 0,
@@ -237,6 +251,8 @@ class TopicAgent(BaseAgent):
         }
         self._seen_search_urls = set()
         self._phase4_queries: List[Dict] = []
+        self._emergency_search_active = False
+        self._phase5_executed = False
         # 进程内缓存 + 同日磁盘缓存
         self._search_cache: Dict[str, Tuple[float, List[Dict]]] = {}
         project_root = Path((config or {}).get("project_root", "."))
@@ -336,7 +352,14 @@ class TopicAgent(BaseAgent):
 
         preflight_candidates = []
         for article in fresh_candidates:
-            passed, reason = self._preflight_article(article)
+            hard_ok, hard_reason = self._hard_reject_check(article)
+            if not hard_ok:
+                logger.info(
+                    f"[选题Agent] 🚫 hard reject: "
+                    f"{article.get('title', '')[:60]} | {hard_reason}"
+                )
+                continue
+            passed, reason = self._soft_preflight_article(article)
             if passed:
                 preflight_candidates.append(article)
             else:
@@ -349,29 +372,15 @@ class TopicAgent(BaseAgent):
             f"[选题Agent] after_preflight={len(fresh_candidates)}"
         )
 
-        # Step 3: 综合评分（15个字段）
+        # Step 3: 综合评分（15个字段）。soft-ready 也参与评分，strict
+        # ready 为 0 时可进入生产救援池。
         scored = await self._score_candidates(fresh_candidates)
 
         # Step 4: 排序选优
-        scored_sorted = sorted(
-            scored,
-            key=lambda x: (
-                x.get("_source_priority", 0),
-                x.get("scores", {}).get("total_score", 0),
-            ),
-            reverse=True
-        )
+        scored_sorted = self._sort_scored(scored)
 
         # Step 5: 过滤不满足 ready 条件的文章
-        ready_articles = []
-        for article in scored_sorted:
-            is_ready, reason = self.scoring.is_ready_for_draft(article.get("scores", {}))
-            if is_ready:
-                ready_articles.append(article)
-            else:
-                logger.info(
-                    f"[选题Agent] ❌ 不满足ready: {article.get('title','?')[:40]} | {reason}"
-                )
+        ready_articles = self._collect_ready(scored_sorted)
 
         # 唯一候选重复或所有候选均未 ready 时，不立即失败。使用预留的
         # Phase 4 预算补搜，并将新候选走完相同的严格过滤和评分流程。
@@ -400,6 +409,51 @@ class TopicAgent(BaseAgent):
                 "Phase 4 supplemental", extra_candidates,
                 ready_count=len(ready_articles), enter_next=False,
             )
+
+        # Phase 5: strict ready 仍为 0 时启用高产英文韩娱站宽搜。
+        if not ready_articles and not self._phase5_executed:
+            logger.warning(
+                "[选题Agent] Phase 5 emergency broad search started"
+            )
+            emergency_candidates = await self._search_phase5_emergency()
+            emergency_prepared = self._prepare_candidates(emergency_candidates)
+            emergency_scored = await self._score_candidates(emergency_prepared)
+            scored.extend(emergency_scored)
+            scored_sorted = self._sort_scored(scored)
+            ready_articles = self._collect_ready(scored_sorted)
+            hard_rejects = (
+                len(emergency_candidates) - len(emergency_prepared)
+            )
+            logger.info(
+                f"[选题Agent] Phase 5 | raw={len(emergency_candidates)} | "
+                f"hard_reject={hard_rejects} | "
+                f"soft_ready={len(emergency_prepared)} | "
+                f"final_selected={len(ready_articles)}"
+            )
+
+        if not ready_articles:
+            cached_candidates = self._cached_rescue_candidates()
+            if cached_candidates:
+                cached_scored = await self._score_candidates(cached_candidates)
+                scored.extend(cached_scored)
+                scored_sorted = self._sort_scored(scored)
+                ready_articles = self._collect_ready(scored_sorted)
+                logger.info(
+                    f"[选题Agent] local search_cache fallback | "
+                    f"候选={len(cached_candidates)} | ready={len(ready_articles)}"
+                )
+
+        # Production rescue：选题阶段只决定“值得继续尝试”，最终两张
+        # 可下载图片仍由配图阶段严格验证。
+        if not ready_articles and self.get_config(
+            "topic.production_rescue_enabled", True
+        ):
+            ready_articles = self._collect_soft_ready(scored_sorted)
+            if ready_articles:
+                logger.warning(
+                    f"[选题Agent] production rescue selection: "
+                    f"{len(ready_articles)} 篇 soft-ready 进入后续尝试"
+                )
 
         if not ready_articles:
             return AgentResult(
@@ -453,6 +507,7 @@ class TopicAgent(BaseAgent):
         return sorted(
             scored,
             key=lambda item: (
+                item.get("_artist_tier", 0),
                 item.get("_source_priority", 0),
                 item.get("scores", {}).get("total_score", 0),
             ),
@@ -488,7 +543,8 @@ class TopicAgent(BaseAgent):
         top_stars = self._filter_top_stars(idol)
         return [
             article for article in top_stars
-            if self._preflight_article(article)[0]
+            if self._hard_reject_check(article)[0]
+            and self._soft_preflight_article(article)[0]
         ]
 
     @staticmethod
@@ -530,6 +586,82 @@ class TopicAgent(BaseAgent):
         if article["image_risk_high"]:
             return False, "图片均来自 AllKpop upload，高403风险且无备用图"
         return True, "preflight通过"
+
+    def _soft_preflight_article(self, article: Dict) -> Tuple[bool, str]:
+        source_url = article.get("source_url") or article.get("url")
+        if not source_url:
+            return False, "缺少 source_url"
+        visible = " ".join([
+            article.get("original_title") or article.get("title") or "",
+            article.get("summary") or article.get("description") or "",
+            article.get("content") or "",
+        ]).strip()
+        if len(visible) < 8:
+            return False, "title/snippet 不足"
+        image_urls = self._image_url_candidates(article)
+        article["valid_image_url_candidates"] = len(image_urls)
+        if not image_urls:
+            return False, "完全没有非logo图片URL"
+        article["image_risk_high"] = all(
+            "allkpop.com/upload" in url.lower() for url in image_urls
+        )
+        return True, "soft-ready"
+
+    def _hard_reject_check(self, article: Dict) -> Tuple[bool, str]:
+        text = " ".join([
+            article.get("title") or "",
+            article.get("summary") or article.get("description") or "",
+            article.get("url") or "",
+        ]).lower()
+        hard_terms = [
+            "politics", "election", "football", "world cup", "semiconductor",
+            "business", "economy", "stock price", "cafeteria", "subway",
+            "restaurant", "cheap meal",
+            "adult", "illegal", "unsafe", "정치", "선거", "축구", "반도체",
+            "기업", "경제", "주가", "식당", "지하철",
+        ] + ESPORTS_GAME_KEYWORDS
+        hit = next(
+            (term for term in hard_terms
+             if self._contains_topic_keyword(text, term)),
+            None,
+        )
+        if hit:
+            return False, f"命中硬过滤词: {hit}"
+        if self.scoring._check_duplicate(article).get("is_duplicate"):
+            return False, "重复 URL/历史文章"
+        if not self._image_url_candidates(article):
+            return False, "完全没有图片 URL"
+        return True, "非hard reject"
+
+    def _collect_soft_ready(self, scored: List[Dict]) -> List[Dict]:
+        rescue = []
+        for article in scored:
+            if not self._hard_reject_check(article)[0]:
+                continue
+            if not self._soft_preflight_article(article)[0]:
+                continue
+            scores = article.get("scores", {})
+            if scores.get("topic_heat_score", 0) < 4:
+                continue
+            if scores.get("risk_score", 0) < 3:
+                continue
+            article["soft_ready"] = True
+            rescue.append(article)
+        return rescue[:max(
+            1, self.get_config("topic.target_final_topics", self.selected_count)
+        )]
+
+    def _cached_rescue_candidates(self) -> List[Dict]:
+        candidates = []
+        seen = set()
+        for _, results in self._search_cache.values():
+            for article in results:
+                url = article.get("url", "")
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                candidates.append(article)
+        return self._prepare_candidates(candidates)
 
     # ==================== Tavily 搜索 ====================
 
@@ -593,6 +725,19 @@ class TopicAgent(BaseAgent):
             or metrics["preflight"]
             < getattr(self, "min_quality_before_supplement", 2),
         )
+        if metrics["preflight"] == 0:
+            logger.info(
+                "[选题Agent] Phase 1-3 after_preflight=0，"
+                "先执行 Phase 4 supplemental"
+            )
+            all_results.extend(await self._search_phase4_supplemental())
+            metrics = self._candidate_metrics(all_results)
+        if metrics["preflight"] == 0:
+            logger.warning(
+                "[选题Agent] Phase 5 emergency broad search started "
+                "(Phase 1-4 after_preflight=0)"
+            )
+            all_results.extend(await self._search_phase5_emergency())
 
         logger.info(
             f"[选题Agent] Tavily搜索完成: {len(all_results)} 篇独特文章 | "
@@ -610,6 +755,8 @@ class TopicAgent(BaseAgent):
     ) -> List[Dict]:
         used = (
             self._core_tavily_calls if purpose == "core"
+            else getattr(self, "_emergency_tavily_calls", 0)
+            if purpose == "emergency"
             else self._extra_tavily_calls
         )
         remaining = max(0, call_limit - used)
@@ -632,6 +779,21 @@ class TopicAgent(BaseAgent):
         return await self._run_search_phase(
             self._phase4_queries, "extra", self.max_extra_tavily_queries
         )
+
+    async def _search_phase5_emergency(self) -> List[Dict]:
+        if getattr(self, "_phase5_executed", False):
+            return []
+        self._phase5_executed = True
+        queries = self._build_tiered_search_queries()["emergency"]
+        self._emergency_search_active = True
+        try:
+            # 允许救援阶段超过常规 12 credits，但仍受 hard stop 20 和
+            # absolute max 50 双重约束。
+            return await self._run_search_phase(
+                queries, "emergency", len(queries)
+            )
+        finally:
+            self._emergency_search_active = False
 
     def _candidate_metrics(self, candidates: List[Dict]) -> Dict[str, int]:
         with_images = [
@@ -694,6 +856,14 @@ class TopicAgent(BaseAgent):
             ("sbsstar.net", "SBS Star", "K-pop idol latest comeback fashion"),
             ("nme.com", "NME K-pop", "K-pop new song tour interview"),
         ]
+        emergency = [
+            ("koreaboo.com", "Koreaboo Emergency", "BTS BLACKPINK NewJeans aespa IVE LE SSERAFIM Stray Kids ENHYPEN latest"),
+            ("allkpop.com", "AllKpop Emergency", "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK aespa IVE comeback"),
+            ("soompi.com", "Soompi Emergency", "BTS Stray Kids SEVENTEEN TXT ENHYPEN BLACKPINK aespa IVE comeback teaser"),
+            ("allkpop.com", "AllKpop K-pop Broad", "K-pop comeback teaser MV concert airport fashion"),
+            ("koreaboo.com", "Koreaboo K-pop Broad", "K-pop fans react controversy airport brand event"),
+            ("soompi.com", "Soompi K-pop Broad", "K-pop comeback MV teaser concert"),
+        ]
         primary_hours = self.get_config(
             "topic_agent.search.freshness_hours_primary", 24
         )
@@ -716,6 +886,7 @@ class TopicAgent(BaseAgent):
                 pack(phase4[:2], secondary_hours, "ko")
                 + pack(phase4[2:], secondary_hours, "en")
             ),
+            "emergency": pack(emergency, secondary_hours, "en"),
         }
 
     def _load_daily_search_cache(self):
@@ -817,6 +988,8 @@ class TopicAgent(BaseAgent):
         purpose = query_info.get("budget_purpose", "core")
         if purpose == "core":
             self._core_tavily_calls += 1
+        elif purpose == "emergency":
+            self._emergency_tavily_calls += 1
         else:
             self._extra_tavily_calls += 1
 
@@ -941,7 +1114,10 @@ class TopicAgent(BaseAgent):
                 f"{self.hard_stop_tavily_credits}，停止追加搜索"
             )
             return False
-        if projected > self.max_total_tavily_credits:
+        if (
+            projected > self.max_total_tavily_credits
+            and not getattr(self, "_emergency_search_active", False)
+        ):
             logger.warning(
                 f"[选题Agent] Tavily 默认credits预算耗尽，跳过: {query[:60]}"
             )
@@ -964,6 +1140,8 @@ class TopicAgent(BaseAgent):
     def _is_aggregate_page(self, url: str) -> bool:
         """检查 URL 是否为聚合页/分类页"""
         url_lower = url.lower()
+        if "mydaily.co.kr/page/view/" in url_lower:
+            return False
         for pattern in self._SKIP_URL_PATTERNS:
             if pattern in url_lower:
                 return True
@@ -1072,13 +1250,14 @@ class TopicAgent(BaseAgent):
                 )
                 continue
 
+            detected_entities = ScoringSystem.detect_artist_entities(
+                visible_text_raw
+            )
             target_hits = [
                 star for star in ScoringSystem.TOP_STARS
                 if ScoringSystem._match_star(star, visible_text_raw)
             ]
-            target_hits.extend(
-                ScoringSystem.detect_artist_entities(visible_text_raw)
-            )
+            target_hits.extend(detected_entities)
             target_hits.extend(
                 alias for alias in IDOL_TARGET_ALIASES
                 if self._match_target_alias(alias, visible_text)
@@ -1137,6 +1316,11 @@ class TopicAgent(BaseAgent):
             logger.info(
                 f"[选题Agent] ✅ {category}通过 "
                 f"(艺人={target_hits[:3]}, {reason}): {title[:80]}"
+            )
+            article["_artist_tier"] = (
+                2 if detected_entities & TARGET_TOP_STAR_ENTITIES
+                else 1 if detected_entities & APPROVED_KPOP_GROUP_ENTITIES
+                else 2
             )
             filtered.append(article)
 
