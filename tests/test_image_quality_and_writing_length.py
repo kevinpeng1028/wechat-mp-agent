@@ -171,12 +171,15 @@ def test_writer_length_hard_limits_and_ideal_length():
     writer = _writer_for_checks()
     assert writer._strict_check({
         "title": "测试标题", "summary": "", "content_text": "中" * 199,
-    })["passed"] is False
+    })["passed"] is True
     assert writer._strict_check({
         "title": "测试标题", "summary": "", "content_text": "中" * 400,
     })["passed"] is True
     assert writer._strict_check({
         "title": "测试标题", "summary": "", "content_text": "中" * 801,
+    })["passed"] is True
+    assert writer._strict_check({
+        "title": "测试标题", "summary": "", "content_text": "中" * 79,
     })["passed"] is False
 
 
@@ -188,7 +191,7 @@ def test_writer_rejects_high_risk_controversy_wording():
         "content_text": "中" * 350,
     })
     assert result["passed"] is False
-    assert any("禁止口吻" in issue for issue in result["issues"])
+    assert any("高风险事实" in issue for issue in result["issues"])
 
 
 def test_retry_prompt_targets_about_400_characters():

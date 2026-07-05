@@ -388,6 +388,25 @@ class _FakeWriter:
         )
 
 
+class _FailingWriterWithSafeFallback:
+    async def run(self, context):
+        return AgentResult(
+            status=AgentStatus.FAILED,
+            agent_name="writer_agent",
+            error="generation failed",
+        )
+
+    def build_safe_fallback_article(self, topic):
+        return {
+            "is_success": True,
+            "title": "安全整理稿",
+            "content_text": "安全事实整理。" * 30,
+            "topic_info": topic,
+            "tavily_images": topic.get("_tavily_images", []),
+            "production_fallback": True,
+        }
+
+
 class _FakeImage:
     def __init__(self, successful_title=None):
         self.successful_title = successful_title
@@ -441,6 +460,28 @@ def test_all_image_failures_return_no_articles():
 
     assert written == []
     assert images == []
+
+
+def test_all_normal_writes_failed_safe_fallback_enters_image_stage():
+    WeChatMPOrchestrator = _orchestrator_class()
+    orchestrator = object.__new__(WeChatMPOrchestrator)
+    orchestrator.writer = _FailingWriterWithSafeFallback()
+    orchestrator.image_agent = _FakeImage(successful_title="candidate")
+    candidate = {
+        "title": "candidate",
+        "_tavily_images": [{"url": "one"}, {"url": "two"}],
+    }
+
+    written, images, _ = asyncio.run(
+        orchestrator._write_with_image_fallback(
+            {}, [candidate], max_attempts=1, target_count=1
+        )
+    )
+
+    assert written
+    assert written[0]["production_fallback"] is True
+    assert images
+    assert orchestrator._last_candidate_attempts[-1]["image_status"] == "success"
 
 
 def test_failure_outcome_distinguishes_writing_from_image_failures():

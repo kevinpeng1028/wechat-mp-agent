@@ -161,6 +161,9 @@ class ScoringSystem:
         "MEOVV": ["MEOVV", "미야오"],
         "CORTIS": ["CORTIS", "코르티스"],
         "ALLDAY_PROJECT": ["ALLDAY PROJECT", "올데이 프로젝트"],
+        "NEWJEANS": ["NewJeans", "뉴진스"],
+        "NEWJEANS_DANIELLE": ["Danielle", "다니엘"],
+        "MIN_HEE_JIN": ["Min Hee-jin", "Min Heejin", "민희진", "闵熙珍"],
     }
 
     @classmethod

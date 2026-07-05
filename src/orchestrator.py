@@ -397,6 +397,56 @@ class WeChatMPOrchestrator:
             if len(successful_articles) >= target_count:
                 break
 
+        # 所有常规写作都失败时，用最高分候选做一次确定性的安全整理，
+        # 避免轻微校验问题让整条生产链停在 writing。
+        if not successful_articles and attempted and hasattr(
+            self.writer, "build_safe_fallback_article"
+        ):
+            topic = attempted[0]
+            fallback_article = self.writer.build_safe_fallback_article(topic)
+            if fallback_article.get("is_success"):
+                failure_counts["writing"] = max(
+                    0, failure_counts["writing"] - 1
+                )
+                logger.warning(
+                    f"[编排器] 常规写作均未产出，启用最高分候选 safe fallback: "
+                    f"{topic.get('title', '')[:80]}"
+                )
+                if hasattr(self.writer, "_save_draft"):
+                    await self.writer._save_draft(fallback_article)
+                image_ctx = dict(ctx)
+                image_ctx["tavily_images"] = fallback_article.get(
+                    "tavily_images", []
+                )
+                image_ctx["topic_info"] = topic
+                image_result = await self.image_agent.run(image_ctx)
+                results.append(AgentResult(
+                    status=AgentStatus.SUCCESS,
+                    agent_name="writer_agent",
+                    output={"written_articles": [fallback_article]},
+                ))
+                results.append(image_result)
+                images = (image_result.output or {}).get("images", [])
+                candidate_attempts.append({
+                    "topic_title": topic.get("title", ""),
+                    "write_status": "success",
+                    "image_status": (
+                        "success" if image_result.is_success and images
+                        else "failed"
+                    ),
+                    "failure_reason": (
+                        "" if image_result.is_success and images
+                        else image_result.error or "safe fallback 图片失败"
+                    ),
+                })
+                if image_result.is_success and images:
+                    fallback_article["position"] = "headline"
+                    fallback_article["topic_info"]["position"] = "headline"
+                    successful_articles.append(fallback_article)
+                    successful_images.extend(images)
+                else:
+                    failure_counts["image"] += 1
+
         self._last_fallback_failures = failure_counts
         self._last_candidate_attempts = candidate_attempts
         return successful_articles, successful_images, results

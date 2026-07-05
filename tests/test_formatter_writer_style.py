@@ -1,3 +1,6 @@
+import asyncio
+from types import SimpleNamespace
+
 from src.formatter.formatting_agent import FormattingAgent
 from src.formatter.template_manager import TemplateManager
 from src.writer.writing_agent import WritingAgent
@@ -93,7 +96,7 @@ def test_writer_fidelity_rejects_invented_reactions_company_and_macro_analysis()
     issues = writer._check_source_fidelity(parsed, source)
 
     assert any("网友/粉丝反应" in issue for issue in issues)
-    assert any("禁止新增: hybe" in issue for issue in issues)
+    assert any("公司别名待核对: hybe" in issue for issue in issues)
     assert any("AI宏观判断" in issue for issue in issues)
 
 
@@ -116,6 +119,98 @@ def test_writer_fidelity_allows_reactions_only_when_source_reports_them():
         "content": "팬들은 새 티저에 긍정적인 반응을 보였다.",
     }]
     assert writer._check_source_fidelity(parsed, korean_source) == []
+
+
+def test_itzy_proper_names_and_concert_fan_reaction_are_production_safe():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": []}}
+    content = (
+        "ITZY完成了《TUNNEL VISION》高雄站演出，成员感谢MIDZY的支持。"
+        "现场粉丝反应热烈，后续巡演日程将继续进行。"
+    ) * 4
+    check = writer._strict_check(
+        {"title": "ITZY高雄巡演结束", "summary": "", "content_text": content}
+    )
+    assert check["passed"]
+    source = [{
+        "title": "ITZY 가오슝 월드투어",
+        "content": "멤버들은 현장 팬의 뜨거운 반응에 감사했다.",
+    }]
+    assert not any(
+        "网友/粉丝反应" in issue
+        for issue in writer._check_source_fidelity(
+            {"title": "ITZY巡演", "summary": "", "content_text": content},
+            source,
+        )
+    )
+
+
+def test_newjeans_and_ador_korean_aliases_are_not_new_entities():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": []}}
+    issues = writer._check_source_fidelity(
+        {
+            "title": "ADOR与NewJeans最新动态",
+            "summary": "",
+            "content_text": "ADOR公开了与NewJeans相关的现有安排。",
+        },
+        [{"title": "어도어 뉴진스 관련 소식", "content": "어도어와 뉴진스"}],
+    )
+    assert not any("公司别名待核对: ador" in issue for issue in issues)
+    assert not any("NEWJEANS" in issue for issue in issues)
+
+
+def test_additionally_is_only_a_soft_warning():
+    writer = object.__new__(WritingAgent)
+    writer.config = {"writer_agent": {"banned_phrases": ["此外"]}}
+    result = writer._strict_check({
+        "title": "TWS最新动态",
+        "summary": "",
+        "content_text": ("TWS公开了新的活动安排。此外，相关日程将按计划推进。" * 8),
+    })
+    assert result["passed"]
+    assert any("此外" in warning for warning in result["warnings"])
+
+
+def test_two_unparseable_generations_use_safe_fallback_article():
+    class FakeCompletions:
+        def __init__(self):
+            self.calls = 0
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="not valid json")
+                )]
+            )
+
+    writer = object.__new__(WritingAgent)
+    writer.config = {
+        "writer_agent": {"banned_phrases": [], "safe_expressions": []},
+        "writing": {"allow_short_news_when_facts_limited": True},
+        "llm": {"model": "test", "temperature": {"writing": 0.1}},
+    }
+    completions = FakeCompletions()
+    writer.llm_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=completions)
+    )
+    topic = {
+        "title": "ITZY world tour update",
+        "original_title": "ITZY world tour update",
+        "content": "\n".join([
+            "ITZY completed a scheduled world tour performance for local fans."
+            for _ in range(7)
+        ]),
+        "_tavily_images": [{"url": "one.jpg"}, {"url": "two.jpg"}],
+    }
+    result = asyncio.run(writer._write_single(topic, {}))
+
+    assert completions.calls == 2
+    assert result["is_success"]
+    assert result["production_fallback"] is True
+    assert len(result["content_text"]) >= 100
+    assert len(__import__("re").findall(r"[\u4e00-\u9fff]", result["content_text"])) >= 100
 
 
 def test_writer_fidelity_allows_no_reaction_when_source_and_output_have_none():
@@ -218,8 +313,10 @@ def test_short_news_mode_accepts_191_chars_but_normal_mode_prefers_more():
     assert 160 <= len(parsed["content_text"]) <= 300
     assert writer._strict_check(parsed, short_news_mode=True)["passed"]
 
-    too_short = dict(parsed, content_text="短讯" * 50)
-    assert not writer._strict_check(too_short, short_news_mode=True)["passed"]
+    production_short = dict(parsed, content_text="短讯" * 50)
+    result = writer._strict_check(production_short, short_news_mode=True)
+    assert result["passed"]
+    assert result["warnings"]
 
 
 def test_fact_rich_article_under_250_chars_requires_rewrite():
@@ -235,5 +332,5 @@ def test_fact_rich_article_under_250_chars_requires_rewrite():
     }
     assert len(parsed["content_text"]) < 250
     result = writer._strict_check(parsed, short_news_mode=False)
-    assert not result["passed"]
-    assert any("250" in issue for issue in result["issues"])
+    assert result["passed"]
+    assert any("生产短文模式" in issue for issue in result["warnings"])

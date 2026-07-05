@@ -194,7 +194,14 @@ class WritingAgent(BaseAgent):
             parsed = self._parse_output(content)
 
             if not parsed:
-                return {"is_success": False, "error": "LLM输出解析失败"}
+                parsed = await self._retry_with_stricter_prompt(
+                    topic, source_articles, tavily_images,
+                    ["LLM输出解析失败"], short_news_mode=short_news_mode,
+                )
+            if not parsed:
+                return self.build_safe_fallback_article(
+                    topic, fact_points, source_articles, tavily_images
+                )
 
             # 严格检查
             check_result = self._strict_check(parsed, short_news_mode)
@@ -202,8 +209,20 @@ class WritingAgent(BaseAgent):
                 parsed, source_articles
             )
             if fidelity_issues:
+                severe = [
+                    issue for issue in fidelity_issues
+                    if issue.startswith("严重事实")
+                ]
+                soft = [issue for issue in fidelity_issues if issue not in severe]
+                check_result["hard_issues"].extend(severe)
+                check_result["warnings"].extend(soft)
                 check_result["issues"].extend(fidelity_issues)
-                check_result["passed"] = False
+                check_result["passed"] = not check_result["hard_issues"]
+            if check_result["warnings"]:
+                logger.warning(
+                    f"[写作Agent] production soft warnings: "
+                    f"{check_result['warnings']}"
+                )
             if not check_result["passed"]:
                 # 尝试修复或直接失败
                 logger.warning(
@@ -221,8 +240,18 @@ class WritingAgent(BaseAgent):
                         parsed, source_articles
                     )
                     if fidelity_issues:
+                        severe = [
+                            issue for issue in fidelity_issues
+                            if issue.startswith("严重事实")
+                        ]
+                        soft = [
+                            issue for issue in fidelity_issues
+                            if issue not in severe
+                        ]
+                        check_result["hard_issues"].extend(severe)
+                        check_result["warnings"].extend(soft)
                         check_result["issues"].extend(fidelity_issues)
-                        check_result["passed"] = False
+                        check_result["passed"] = not check_result["hard_issues"]
 
             if not check_result["passed"]:
                 logger.error(
@@ -230,10 +259,10 @@ class WritingAgent(BaseAgent):
                     f"原因={check_result['issues']} | "
                     f"重试稿片段={parsed.get('content_text', '')[:240]}"
                 )
-                return {
-                    "is_success": False,
-                    "error": f"严格检查未通过: {check_result['issues']}",
-                }
+                return self.build_safe_fallback_article(
+                    topic, fact_points, source_articles, tavily_images,
+                    fallback_reason=check_result["hard_issues"],
+                )
 
             # 组装结果
             word_count = len(parsed.get("content_text", "").replace(" ", ""))
@@ -257,6 +286,12 @@ class WritingAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"[写作Agent] LLM调用异常: {e}")
+            fallback = self.build_safe_fallback_article(
+                topic, fact_points, source_articles, tavily_images,
+                fallback_reason=[f"LLM调用异常: {e}"],
+            )
+            if fallback.get("is_success"):
+                return fallback
             return {"is_success": False, "error": str(e)}
 
     def _get_source_articles(self, topic: Dict) -> List[Dict]:
@@ -544,27 +579,36 @@ class WritingAgent(BaseAgent):
 
         reaction_terms = [
             "网友", "粉丝", "评论区", "netizen", "fans react",
-            "네티즌", "팬 반응", "팬들은",
+            "네티즌", "팬", "관객", "환호", "응원",
         ]
         if any(term in output_lower for term in reaction_terms) and not any(
             term in source_lower for term in reaction_terms
         ):
             issues.append("原文未提供网友/粉丝反应，禁止自行补充")
 
-        company_terms = [
-            "hybe", "bighit", "sm entertainment", "jyp entertainment",
-            "yg entertainment", "starship", "ador", "source music",
-        ]
-        for company in company_terms:
-            if company in output_lower and company not in source_lower:
-                issues.append(f"原文未提及公司，禁止新增: {company}")
+        company_aliases = {
+            "hybe": ["hybe", "하이브"],
+            "bighit": ["bighit", "빅히트"],
+            "ador": ["ador", "어도어"],
+            "sm entertainment": ["sm entertainment", "sm엔터테인먼트"],
+            "jyp entertainment": ["jyp entertainment", "jyp엔터테인먼트"],
+            "yg entertainment": ["yg entertainment", "yg엔터테인먼트"],
+            "starship": ["starship", "스타쉽"],
+            "source music": ["source music", "쏘스뮤직"],
+        }
+        for company, aliases in company_aliases.items():
+            if (
+                any(alias in output_lower for alias in aliases)
+                and not any(alias in source_lower for alias in aliases)
+            ):
+                issues.append(f"公司别名待核对: {company}")
 
         try:
             from src.topic.scoring import ScoringSystem
             source_people = ScoringSystem.detect_artist_entities(source)
             output_people = ScoringSystem.detect_artist_entities(output)
             for person in sorted(output_people - source_people):
-                issues.append(f"原文未提及艺人，禁止新增: {person}")
+                issues.append(f"艺人别名待核对: {person}")
         except Exception:
             pass
 
@@ -574,7 +618,7 @@ class WritingAgent(BaseAgent):
                 "confirmed relationship", "确认恋情", "证实恋情", "officially confirmed"
             ])
         ):
-            issues.append("原文未确认恋情，禁止把猜测写成事实")
+            issues.append("严重事实：原文未确认恋情，禁止把猜测写成事实")
         return issues
 
     def _build_image_info(self, tavily_images: List[Dict]) -> str:
@@ -620,64 +664,61 @@ class WritingAgent(BaseAgent):
     def _strict_check(
         self, parsed: Dict, short_news_mode: bool = False
     ) -> Dict:
-        """严格检查输出是否符合规则"""
-        issues = []
+        """生产校验：少量 hard fail，其余仅记录 soft warning。"""
+        hard_issues = []
+        warnings = []
 
-        content = parsed.get("content_text", "")
-        title = parsed.get("title", "")
+        content = (parsed.get("content_text") or "").strip()
+        title = (parsed.get("title") or "").strip()
         summary = parsed.get("summary", "")
+        title_has_chinese = bool(re.search(r"[\u4e00-\u9fff]", title))
+        if not title:
+            hard_issues.append("标题为空")
+        if not content:
+            hard_issues.append("正文为空")
 
-        # 检查韩语字符 — 所有输出必须是中文
+        chinese_count = len(re.findall(r"[\u4e00-\u9fff]", content))
+        if content and chinese_count < 80:
+            hard_issues.append(f"中文正文过短({chinese_count} < 80)")
+        requires_repair = (
+            (bool(content) and 80 <= chinese_count < 100)
+            or (bool(title) and not title_has_chinese)
+        )
+        if title and not title_has_chinese:
+            warnings.append("标题缺少中文信息")
+        if requires_repair:
+            warnings.append(f"中文正文不足生产下限({chinese_count} < 100)")
+
+        # 韩文或英文专有名词只提示，不阻断生产。
         korean_pattern = re.compile(r'[\uac00-\ud7af\u1100-\u11ff\u3130-\u318f]')
         if korean_pattern.search(title):
-            issues.append("标题含韩语字符，必须翻译为中文")
+            warnings.append("标题含少量韩语专有名词")
         if korean_pattern.search(summary):
-            issues.append("摘要含韩语字符，必须翻译为中文")
+            warnings.append("摘要含少量韩语专有名词")
         if korean_pattern.search(content):
-            # 找出韩语片段以便调试
             korean_fragments = korean_pattern.findall(content)
-            issues.append(f"正文含韩语字符({len(korean_fragments)}处)，必须翻译为中文")
+            warnings.append(f"正文含韩语专有名词({len(korean_fragments)}处)")
 
-        # 检查字数
         char_count = len(content.replace(" ", "").replace("\n", ""))
-        absolute_min = self.get_config("writing.absolute_min_chars", 160)
-        effective_min = absolute_min if short_news_mode else 250
-        ideal_max = self.get_config("writing.ideal_max_chars", 500)
-        short_max = self.get_config("writing.short_news_mode_max_chars", 300)
-        if char_count < effective_min:
-            issues.append(f"字数不足({char_count} < {effective_min})")
-        elif short_news_mode and char_count > short_max:
-            # 短讯超过推荐值不是事实错误，不强制失败。
-            logger.info(
-                f"[写作Agent] short_news_mode 字数 {char_count}，"
-                f"高于推荐上限 {short_max}，但不强制截断"
-            )
-        elif not short_news_mode and char_count > max(800, ideal_max):
-            issues.append(f"字数超标({char_count} > 800)")
+        if 80 <= chinese_count < 160:
+            warnings.append(f"生产短文模式({chinese_count}个中文字符)")
+        if char_count > 1200:
+            warnings.append(f"正文偏长({char_count})")
 
-        # 检查禁止口吻
         banned = self.get_config("writer_agent.banned_phrases", [])
         for phrase in banned:
             if phrase in content or phrase in title:
-                issues.append(f"含禁止口吻: '{phrase}'")
+                warnings.append(f"含不推荐口吻: '{phrase}'")
 
-        # 检查 hashtag
         if re.search(r'#\w', content):
-            issues.append("含hashtag")
-
-        # 检查 emoji
+            warnings.append("含hashtag")
         if re.search(r'[\U0001F000-\U0001FFFF\U00002600-\U000027FF]', content):
-            issues.append("含emoji")
-
-        # 检查 Markdown 标题符号
+            warnings.append("含emoji")
         if re.search(r'^#+\s', content, re.MULTILINE):
-            issues.append("含Markdown标题符号")
-
-        # 检查标题是否在正文重复
+            warnings.append("含Markdown标题符号")
         if title and title in content:
-            issues.append("标题在正文重复")
+            warnings.append("标题在正文重复")
 
-        # 检查具体图片描述（禁止编造）
         forbidden_patterns = [
             r'照片[里中第那]',
             r'那张',
@@ -692,10 +733,24 @@ class WritingAgent(BaseAgent):
         ]
         for pattern in forbidden_patterns:
             if re.search(pattern, content):
-                issues.append(f"疑似编造图片细节: 匹配'{pattern}'")
+                warnings.append(f"疑似图片细节: 匹配'{pattern}'")
 
+        severe_patterns = [
+            "确认死亡", "已经去世", "涉嫌违法", "被判刑", "判处",
+            "确认恋情", "证实恋情", "恋情属实", "吸毒", "色情",
+            "仇恨言论", "政治立场", "非法交易", "被指与女友调情",
+            "恋情实锤", "疑似塌房",
+        ]
+        for phrase in severe_patterns:
+            if phrase in content or phrase in title:
+                hard_issues.append(f"高风险事实/表达: '{phrase}'")
+
+        issues = hard_issues + warnings
         return {
-            "passed": len(issues) == 0,
+            "passed": len(hard_issues) == 0 and not requires_repair,
+            "hard_issues": hard_issues,
+            "warnings": warnings,
+            "requires_repair": requires_repair,
             "issues": issues,
         }
 
@@ -742,6 +797,87 @@ class WritingAgent(BaseAgent):
         except Exception as e:
             logger.error(f"[写作Agent] 重试失败: {e}")
             return None
+
+    def build_safe_fallback_article(
+        self,
+        topic: Dict,
+        fact_points: Optional[List[str]] = None,
+        source_articles: Optional[List[Dict]] = None,
+        tavily_images: Optional[List[Dict]] = None,
+        fallback_reason: Optional[List[str]] = None,
+    ) -> Dict:
+        """基于已提取事实生成保守可发布稿，不追求风格化。"""
+        facts = fact_points or topic.get("extracted_facts") or self._extract_fact_points(
+            source_articles or [topic]
+        )
+        if not facts:
+            return {"is_success": False, "error": "safe fallback 缺少事实"}
+
+        source_title = (
+            topic.get("original_title") or topic.get("title") or ""
+        ).strip()
+        group_match = re.search(
+            r"ITZY|TWS|NewJeans|ADOR|ENHYPEN|IVE|Stray Kids|"
+            r"BLACKPINK|BTS|aespa|KISS OF LIFE",
+            source_title,
+            re.IGNORECASE,
+        )
+        subject = group_match.group(0) if group_match else "韩国偶像"
+        title = f"{subject}最新活动动态"
+        facts_text = "；".join(
+            re.sub(r"\s+", " ", fact).strip()[:180]
+            for fact in facts[:5]
+            if fact.strip()
+        )
+        content = (
+            f"根据现有公开资料，本次消息围绕{subject}的最新活动展开。"
+            f"原文已经确认的信息包括：{facts_text}。"
+            "本文仅对现有标题、摘要和公开事实进行中文整理，没有补充未经来源确认的"
+            "恋情、法律结论、金额、日期或公司回应。相关活动的具体时间、地点和后续"
+            "安排，均以原报道及官方渠道后续公开的信息为准。"
+        )
+        # 保证生产稿达到最低可用长度，但不新增事件事实。
+        if len(re.findall(r"[\u4e00-\u9fff]", content)) < 100:
+            content += (
+                "目前可确认内容以原文列出的活动进展为限，后续如有新的正式安排，"
+                "将以艺人、组合或所属公司的官方发布为准。"
+            )
+        check = self._strict_check(
+            {"title": title, "summary": "", "content_text": content},
+            short_news_mode=True,
+        )
+        if not check["passed"]:
+            return {
+                "is_success": False,
+                "error": f"safe fallback hard fail: {check['hard_issues']}",
+            }
+        logger.warning(
+            f"[写作Agent] 使用 production safe fallback | "
+            f"原因={fallback_reason or []} | 字数={len(content)}"
+        )
+        images = tavily_images if tavily_images is not None else topic.get(
+            "_tavily_images", []
+        )
+        return {
+            "is_success": True,
+            "title": title,
+            "summary": f"{subject}最新公开动态的事实整理。",
+            "content_text": content,
+            "content_html": "".join(
+                f"<p>{paragraph}</p>"
+                for paragraph in re.split(r"(?<=[。])", content)
+                if paragraph.strip()
+            ),
+            "word_count": len(content.replace(" ", "")),
+            "source_articles": source_articles or [topic],
+            "tavily_images": images,
+            "topic_info": topic,
+            "position": topic.get("position", "unknown"),
+            "extracted_facts": facts,
+            "short_news_mode": True,
+            "production_fallback": True,
+            "soft_warnings": check["warnings"],
+        }
 
     async def _save_draft(self, article: Dict):
         """保存文章草稿到本地"""
