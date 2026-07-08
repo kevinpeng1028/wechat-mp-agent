@@ -97,21 +97,10 @@ class ImageConsistencyChecker:
             )
             score -= 10
 
-        if len(valid_images) < self.min_images_required:
-            if (
-                (self.allow_cover_only_mode or self.allow_single_high_quality_image)
-                and
-                len(valid_images) == 1
-            ):
-                issues.append("仅1张有效图片，进入封面图模式")
-            else:
-                issues.append(
-                    f"有效图片不足({len(valid_images)} < "
-                    f"{self.min_images_required})"
-                )
-                return self._build_result(
-                    0, issues, valid_images, excluded_images, False
-                )
+        if len(valid_images) == 1 and (
+            self.allow_cover_only_mode or self.allow_single_high_quality_image
+        ):
+            issues.append("仅1张有效图片，进入封面图模式")
 
         # Step 2: 人物一致性检查
         idol_match, idol_issues = self._check_idol_match(article, valid_images)

@@ -128,7 +128,7 @@ topic_agent:
     min_quality_before_supplement: 2
     ready_candidate_target: 1
     use_search_cache: true
-    min_images_per_article: 2   # 默认至少2张强相关真实图片
+    min_images_per_article: 1   # 默认至少1张强相关真实图片；1张时进入封面图模式
     max_images_per_article: 4   # 每篇文章最多4张图，必须强相关
 
   image:

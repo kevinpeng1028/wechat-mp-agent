@@ -407,31 +407,7 @@ class ImageAgent(BaseAgent):
                 "但保留已通过图片继续"
             )
 
-        min_required = self.get_config(
-            "topic_agent.image.min_valid_images_to_continue",
-            self.get_config("topic_agent.image.min_images_required", 1),
-        )
         quality_warning = None
-        if len(valid_downloaded) < min_required:
-            # 仅允许一张非常高质量的新闻图作为例外，绝不以低质图凑数。
-            if (
-                self.get_config(
-                    "topic_agent.image.allow_single_high_quality_image", False
-                )
-                and
-                len(valid_downloaded) == 1
-                and valid_downloaded[0].get("quality_score", 0) >= 90
-            ):
-                quality_warning = "仅1张高质量图片，按例外保留"
-                logger.warning(f"[配图Agent] ⚠️ {quality_warning}")
-            else:
-                return AgentResult(
-                    status=AgentStatus.FAILED,
-                    agent_name=self.name,
-                    error=(
-                        f"有效图片不足: {len(valid_downloaded)} < {min_required}"
-                    ),
-                )
         cover_only_mode = (
             len(valid_downloaded) == 1
             and bool(self.get_config("topic_agent.image.allow_cover_only_mode", True))
