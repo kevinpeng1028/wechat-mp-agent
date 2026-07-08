@@ -383,6 +383,10 @@ class WeChatMPOrchestrator:
             position = "headline" if not successful_articles else "sub_headline"
             article["position"] = position
             article["topic_info"]["position"] = position
+            article["tavily_images"] = images
+            article["cover_only_mode"] = bool(
+                (image_result.output or {}).get("cover_only_mode")
+            )
             successful_articles.append(article)
             successful_images.extend(images)
             candidate_attempts.append({
@@ -442,6 +446,10 @@ class WeChatMPOrchestrator:
                 if image_result.is_success and images:
                     fallback_article["position"] = "headline"
                     fallback_article["topic_info"]["position"] = "headline"
+                    fallback_article["tavily_images"] = images
+                    fallback_article["cover_only_mode"] = bool(
+                        (image_result.output or {}).get("cover_only_mode")
+                    )
                     successful_articles.append(fallback_article)
                     successful_images.extend(images)
                 else:

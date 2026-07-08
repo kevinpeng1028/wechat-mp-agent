@@ -130,6 +130,25 @@ class FormattingAgent(BaseAgent):
 
         # 使用过滤后的有效图片
         valid_images = consistency.get("valid_images", tavily_images)
+        cover_image = valid_images[0] if valid_images else None
+        cover_only_mode = (
+            len(valid_images) == 1
+            and self.get_config("topic_agent.image.allow_cover_only_mode", True)
+        )
+        cover_in_body = self.get_config(
+            "formatter_agent.image_insertion.cover_in_body", False
+        )
+        if cover_in_body:
+            render_images = valid_images
+        else:
+            render_images = [
+                img for img in valid_images
+                if img.get("position") not in ("cover", "thumb", "cover_image")
+            ]
+        if cover_only_mode:
+            render_images = []
+            logger.warning("[排版Agent] ⚠️ 仅1张有效图片，进入封面图模式")
+            logger.info("[排版Agent] 正文图为空，继续排版")
 
         # Step 2: 提取导语和结尾
         intro = self._extract_intro(content_text)
@@ -191,7 +210,7 @@ class FormattingAgent(BaseAgent):
             summary=summary,
             intro=intro,
             body_paragraphs=paragraphs,
-            images=valid_images,
+            images=render_images,
             ending=ending,
         )
 
@@ -207,13 +226,14 @@ class FormattingAgent(BaseAgent):
             "word_count": len(content_text.replace(" ", "")),
             "paragraph_count": len(paragraphs),
             "image_count": len(valid_images),
+            "cover_only_mode": cover_only_mode,
             "consistency_score": consistency.get("consistency_score", 0),
             "template_used": template.get("name") if template else "system_default",
             "position": article.get("position", "unknown"),
             # 传递给发布Agent
             "valid_images": valid_images,
-            "cover_image": valid_images[0] if valid_images else None,
-            "inline_images": valid_images[1:] if len(valid_images) > 1 else [],
+            "cover_image": cover_image,
+            "inline_images": render_images,
         }
 
         return result

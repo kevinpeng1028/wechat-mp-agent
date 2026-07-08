@@ -161,8 +161,16 @@ class PublisherAgent(BaseAgent):
 
         # 上传正文图并替换HTML中的路径（同时移除上传失败的图片及说明）
         valid_images = article.get("valid_images", [])
-        if valid_images:
-            html = await self._upload_inline_images_and_replace(html, valid_images, token)
+        inline_images = article.get("inline_images")
+        if inline_images is None:
+            inline_images = [
+                img for img in valid_images
+                if img.get("position") not in ("cover", "thumb", "cover_image")
+            ]
+        if inline_images:
+            html = await self._upload_inline_images_and_replace(html, inline_images, token)
+        else:
+            logger.info("[发布Agent] 正文图为空，跳过正文图上传")
 
         # 如果没有封面图 media_id，尝试使用正文第一张图
         if not thumb_media_id and valid_images:

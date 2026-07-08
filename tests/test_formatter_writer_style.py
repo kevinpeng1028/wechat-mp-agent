@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from src.formatter.formatting_agent import FormattingAgent
 from src.formatter.template_manager import TemplateManager
+from src.publisher.publisher_agent import PublisherAgent
 from src.writer.writing_agent import WritingAgent
 
 
@@ -43,6 +44,71 @@ def test_sanitizer_removes_legacy_figcaption_and_gray_technical_text():
     assert "local_file.jpg" not in html
     assert "tavily_001.jpg" not in html
     assert "figcaption" not in html.lower()
+
+
+def test_formatter_allows_single_cover_image_without_inline_image(tmp_path):
+    formatter = FormattingAgent({
+        "project_root": str(tmp_path),
+        "topic_agent": {"image": {
+            "min_valid_images_to_continue": 1,
+            "allow_cover_only_mode": True,
+        }},
+        "formatter_agent": {
+            "image_insertion": {"cover_in_body": False, "rules": {}},
+            "consistency_check": {"threshold": 40},
+            "default_style": {},
+        },
+        "template_system": {"storage_path": "templates.json"},
+    })
+    result = asyncio.run(formatter.execute({
+        "written_articles": [{
+            "title": "BTS V最新动态",
+            "summary": "",
+            "content_text": "BTS V近日公开最新动态，相关消息围绕个人行程展开。粉丝后续仍可关注官方公开信息。",
+            "topic_info": {"title": "BTS V latest update"},
+            "tavily_images": [{
+                "url": "https://img.example.com/v.jpg",
+                "position": "cover",
+                "quality_passed": True,
+                "quality_score": 90,
+                "description": "BTS V news photo",
+            }],
+        }],
+    }))
+    article = result.output["formatted_articles"][0]
+    assert article["is_success"] is True
+    assert article["cover_only_mode"] is True
+    assert article["cover_image"]
+    assert article["inline_images"] == []
+    assert "<img" not in article["html_content"]
+
+
+def test_publisher_allows_cover_only_article_and_skips_inline_upload():
+    publisher = PublisherAgent({})
+    inline_called = {"value": False}
+
+    async def upload_cover(image, token):
+        return {"media_id": "thumb_media_id"}
+
+    async def upload_inline(html, images, token):
+        inline_called["value"] = True
+        return html
+
+    publisher._upload_cover_image = upload_cover
+    publisher._upload_inline_images_and_replace = upload_inline
+
+    article = asyncio.run(publisher._prepare_draft_article({
+        "title": "BTS V最新动态",
+        "summary": "摘要",
+        "html_content": "<section><p>正文内容</p></section>",
+        "cover_image": {"path": "cover.jpg", "position": "cover"},
+        "valid_images": [{"path": "cover.jpg", "position": "cover"}],
+        "inline_images": [],
+    }, "token"))
+
+    assert article is not None
+    assert article["thumb_media_id"] == "thumb_media_id"
+    assert inline_called["value"] is False
 
 
 def test_writer_prompt_uses_mobile_kpop_newsletter_style_without_ai_news_tone():

@@ -42,12 +42,22 @@ class ImageConsistencyChecker:
         self.min_images_required = (
             config.get("topic_agent", {})
             .get("image", {})
-            .get("min_images_required", 2)
+            .get(
+                "min_valid_images_to_continue",
+                config.get("topic_agent", {})
+                .get("image", {})
+                .get("min_images_required", 1),
+            )
+        )
+        self.allow_cover_only_mode = (
+            config.get("topic_agent", {})
+            .get("image", {})
+            .get("allow_cover_only_mode", True)
         )
         self.allow_single_high_quality_image = (
             config.get("topic_agent", {})
             .get("image", {})
-            .get("allow_single_high_quality_image", False)
+            .get("allow_single_high_quality_image", True)
         )
 
     def check_consistency(
@@ -85,18 +95,15 @@ class ImageConsistencyChecker:
             issues.append(
                 f"超过一半图片不合格({len(excluded_images)}/{len(images)})"
             )
-            return self._build_result(
-                0, issues, valid_images, excluded_images, False
-            )
+            score -= 10
 
         if len(valid_images) < self.min_images_required:
             if (
-                self.allow_single_high_quality_image
+                (self.allow_cover_only_mode or self.allow_single_high_quality_image)
                 and
                 len(valid_images) == 1
-                and valid_images[0].get("quality_score", 0) >= 90
             ):
-                issues.append("仅1张高质量图片，按例外保留")
+                issues.append("仅1张有效图片，进入封面图模式")
             else:
                 issues.append(
                     f"有效图片不足({len(valid_images)} < "

@@ -33,6 +33,18 @@ def _is_blocked_image(url: str, description: str = "") -> bool:
     return False
 
 
+def _is_broken_starnews_image_url(url: str) -> bool:
+    """Skip StarNews article-path image URLs that are known 404 candidates."""
+    url_l = (url or "").lower()
+    if "starnewskorea.com" not in url_l:
+        return False
+    if "image.starnewskorea.com/cdn-cgi/image/" in url_l:
+        return False
+    parsed = urlparse(url_l)
+    path = parsed.path or ""
+    return "/music/" in path and "/w=1200/" in path
+
+
 def _is_logo_or_symbol(img_path: str) -> bool:
     """
     通过图片内容分析判断是否为 LOGO/符号/图标。
@@ -266,6 +278,9 @@ class ImageAgent(BaseAgent):
             desc = img_info.get("description", "") if isinstance(img_info, dict) else ""
             if not url:
                 continue
+            if _is_broken_starnews_image_url(url):
+                logger.info(f"[配图Agent] 跳过StarNews无效拼接图片URL: {url[:100]}")
+                continue
             if _is_blocked_image(url, desc):
                 logger.info(f"[配图Agent] 跳过LOGO/广告图片: {url[:80]}")
                 continue
@@ -387,17 +402,14 @@ class ImageAgent(BaseAgent):
             )
 
         if len(quality_rejected) > len(downloaded) / 2:
-            return AgentResult(
-                status=AgentStatus.FAILED,
-                agent_name=self.name,
-                error=(
-                    f"超过一半图片质量不合格 "
-                    f"({len(quality_rejected)}/{len(downloaded)})"
-                ),
+            logger.warning(
+                f"[配图Agent] ⚠️ 多张图片不可用({len(quality_rejected)}/{len(downloaded)})，"
+                "但保留已通过图片继续"
             )
 
         min_required = self.get_config(
-            "topic_agent.image.min_images_required", 2
+            "topic_agent.image.min_valid_images_to_continue",
+            self.get_config("topic_agent.image.min_images_required", 1),
         )
         quality_warning = None
         if len(valid_downloaded) < min_required:
@@ -420,6 +432,14 @@ class ImageAgent(BaseAgent):
                         f"有效图片不足: {len(valid_downloaded)} < {min_required}"
                     ),
                 )
+        cover_only_mode = (
+            len(valid_downloaded) == 1
+            and bool(self.get_config("topic_agent.image.allow_cover_only_mode", True))
+        )
+        if cover_only_mode:
+            quality_warning = "仅1张有效图片，进入封面图模式"
+            logger.warning("[配图Agent] ⚠️ 仅1张有效图片，进入封面图模式")
+            logger.info("[配图Agent] 正文图为空，继续排版")
 
         # 质量最高且最清晰的图片优先作为封面。
         valid_downloaded.sort(
@@ -461,6 +481,7 @@ class ImageAgent(BaseAgent):
                 "inline_images": categorized["inline"],
                 "footer_images": categorized["footer"],
                 "total_count": len(all_images),
+                "cover_only_mode": cover_only_mode,
                 "image_dir": str(self.image_dir),
                 "quality_warning": quality_warning,
                 "rejected_image_count": len(quality_rejected),
@@ -725,6 +746,7 @@ class ImageAgent(BaseAgent):
 
         if len(downloaded) == 1:
             # 只有一张图，用作封面
+            downloaded[0]["position"] = "cover"
             return {"cover": [downloaded[0]], "inline": [], "footer": []}
 
         if len(downloaded) == 2:

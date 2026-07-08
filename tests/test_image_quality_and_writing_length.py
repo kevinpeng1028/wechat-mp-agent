@@ -3,7 +3,11 @@ import asyncio
 import numpy as np
 from PIL import Image, ImageFilter
 
-from src.image.image_agent import ImageAgent, _assess_image_quality
+from src.image.image_agent import (
+    ImageAgent,
+    _assess_image_quality,
+    _is_broken_starnews_image_url,
+)
 from src.image.image_consistency import ImageConsistencyChecker
 from src.writer.writing_agent import WritingAgent
 
@@ -45,7 +49,16 @@ def test_image_relevance_rejects_different_known_artist():
     assert result["passed"] is False
 
 
-def test_consistency_rejects_majority_low_quality_images():
+def test_starnews_broken_article_image_urls_are_skipped_but_cdn_images_remain():
+    assert _is_broken_starnews_image_url(
+        "https://www.starnewskorea.com/music/2026/07/05/w=1200/21/2026/07/bad.jpg"
+    )
+    assert not _is_broken_starnews_image_url(
+        "https://image.starnewskorea.com/cdn-cgi/image/f=auto,w=1200,h=1580,fit=cover,q=h/photo.jpg"
+    )
+
+
+def test_consistency_keeps_one_valid_image_when_majority_are_low_quality():
     checker = ImageConsistencyChecker({
         "topic_agent": {"image": {"min_images_required": 2}},
         "formatter_agent": {"consistency_check": {"threshold": 40}},
@@ -62,15 +75,16 @@ def test_consistency_rejects_majority_low_quality_images():
         {"title": "BTS Jungkook update", "content": ""},
         images,
     )
-    assert result["passed"] is False
+    assert result["passed"] is True
+    assert result["valid_image_count"] == 1
     assert any("超过一半图片不合格" in issue for issue in result["issues"])
 
 
-def test_single_high_quality_image_fails_by_default():
+def test_single_valid_image_enters_cover_only_mode_by_default():
     checker = ImageConsistencyChecker({
         "topic_agent": {"image": {
-            "min_images_required": 2,
-            "allow_single_high_quality_image": False,
+            "min_valid_images_to_continue": 1,
+            "allow_cover_only_mode": True,
         }},
         "formatter_agent": {"consistency_check": {"threshold": 40}},
     })
@@ -83,11 +97,11 @@ def test_single_high_quality_image_fails_by_default():
             "description": "BTS Jungkook news photo",
         }],
     )
-    assert result["passed"] is False
-    assert any("有效图片不足" in issue for issue in result["issues"])
+    assert result["passed"] is True
+    assert result["valid_image_count"] == 1
 
 
-def test_single_high_quality_image_requires_explicit_opt_in():
+def test_single_high_quality_image_records_cover_only_warning():
     checker = ImageConsistencyChecker({
         "topic_agent": {"image": {
             "min_images_required": 2,
@@ -105,10 +119,10 @@ def test_single_high_quality_image_requires_explicit_opt_in():
         }],
     )
     assert result["passed"] is True
-    assert any("仅1张高质量图片" in issue for issue in result["issues"])
+    assert result["valid_image_count"] == 1
 
 
-def test_more_than_half_bad_images_make_article_image_step_fail(tmp_path):
+def test_more_than_half_bad_images_keep_one_valid_image_in_cover_only_mode(tmp_path):
     sharp = tmp_path / "sharp.jpg"
     blurred1 = tmp_path / "blurred1.jpg"
     blurred2 = tmp_path / "blurred2.jpg"
@@ -118,8 +132,13 @@ def test_more_than_half_bad_images_make_article_image_step_fail(tmp_path):
 
     agent = object.__new__(ImageAgent)
     agent.get_config = lambda key, default=None: {
-        "topic_agent.image": {"min_images_required": 2},
-        "topic_agent.image.min_images_required": 2,
+        "topic_agent.image": {
+            "min_valid_images_to_continue": 1,
+            "allow_cover_only_mode": True,
+        },
+        "topic_agent.image.min_valid_images_to_continue": 1,
+        "topic_agent.image.min_images_required": 1,
+        "topic_agent.image.allow_cover_only_mode": True,
     }.get(key, default)
     agent.image_dir = tmp_path
     agent._create_smart_cover = lambda path: None
@@ -149,8 +168,10 @@ def test_more_than_half_bad_images_make_article_image_step_fail(tmp_path):
             {"url": "https://img.example.com/3.jpg"},
         ],
     }))
-    assert result.is_success is False
-    assert "超过一半图片质量不合格" in result.error
+    assert result.is_success is True
+    assert result.output["total_count"] == 1
+    assert result.output["cover_only_mode"] is True
+    assert result.output["inline_images"] == []
 
 
 def _writer_for_checks():

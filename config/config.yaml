@@ -135,8 +135,11 @@ topic_agent:
     max_article_image_attempts: 5
     max_image_search_queries: 2
     require_valid_image: true
-    min_images_required: 2
-    allow_single_high_quality_image: false
+    min_images_required: 1
+    min_valid_images_to_continue: 1
+    min_inline_images: 0
+    allow_cover_only_mode: true
+    allow_single_high_quality_image: true
     min_width: 480
     min_height: 320
     min_file_size_kb: 25
