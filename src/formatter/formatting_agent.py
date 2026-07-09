@@ -188,6 +188,7 @@ class FormattingAgent(BaseAgent):
             max_chars=self.paragraph_rules.get("max_chars", 90),
             split_threshold=self.paragraph_rules.get("split_threshold", 120),
         )
+        paragraphs = self._dedupe_paragraphs(paragraphs)
 
         # 再次检查：移除末尾与结尾重复的段落
         if ending and paragraphs:
@@ -197,6 +198,7 @@ class FormattingAgent(BaseAgent):
                 paragraphs.pop()
             elif last_para.endswith(ending_clean):
                 paragraphs[-1] = last_para[:last_para.rfind(ending_clean)].rstrip("。")
+        paragraphs = self._dedupe_paragraphs(paragraphs)
 
         # Step 5: 解析模板
         template = self.template_mgr.resolve_template(
@@ -237,6 +239,42 @@ class FormattingAgent(BaseAgent):
         }
 
         return result
+
+    @staticmethod
+    def _normalize_sentence_for_dedupe(text: str) -> str:
+        return re.sub(r"\s+", "", text.strip("。！？!?，,；;：: "))
+
+    def _dedupe_paragraphs(self, paragraphs: List[str]) -> List[str]:
+        """Remove repeated sentences/paragraphs without changing factual content."""
+        seen_sentences = set()
+        seen_paragraphs = set()
+        cleaned = []
+
+        for para in paragraphs:
+            para = (para or "").strip()
+            if not para:
+                continue
+            para_key = self._normalize_sentence_for_dedupe(para)
+            if para_key in seen_paragraphs:
+                continue
+            seen_paragraphs.add(para_key)
+
+            parts = re.split(r"(?<=[。！？!?])", para)
+            kept = []
+            for part in parts:
+                sentence = part.strip()
+                if not sentence:
+                    continue
+                key = self._normalize_sentence_for_dedupe(sentence)
+                if len(key) >= 12 and key in seen_sentences:
+                    continue
+                if len(key) >= 12:
+                    seen_sentences.add(key)
+                kept.append(sentence)
+            if kept:
+                cleaned.append("".join(kept))
+
+        return cleaned
 
     def _extract_intro(self, text: str) -> str:
         """提取导语段（正文前1-2句）"""

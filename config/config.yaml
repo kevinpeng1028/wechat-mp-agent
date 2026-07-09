@@ -140,6 +140,9 @@ topic_agent:
     min_inline_images: 0
     allow_cover_only_mode: true
     allow_single_high_quality_image: true
+    cover_face_priority: true
+    avoid_body_only_cover: true
+    cover_crop_mode: "smart_center_or_face"
     min_width: 480
     min_height: 320
     min_file_size_kb: 25

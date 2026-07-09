@@ -46,6 +46,20 @@ def test_sanitizer_removes_legacy_figcaption_and_gray_technical_text():
     assert "figcaption" not in html.lower()
 
 
+def test_formatter_dedupes_repeated_sentences_and_paragraphs():
+    formatter = object.__new__(FormattingAgent)
+    paragraphs = formatter._dedupe_paragraphs([
+        "BTS V公开了最新动态。后续行程仍以官方消息为准。",
+        "BTS V公开了最新动态。后续行程仍以官方消息为准。",
+        "相关讨论仍在继续。后续行程仍以官方消息为准。",
+    ])
+
+    joined = "".join(paragraphs)
+    assert joined.count("BTS V公开了最新动态") == 1
+    assert joined.count("后续行程仍以官方消息为准") == 1
+    assert "相关讨论仍在继续" in joined
+
+
 def test_formatter_allows_single_cover_image_without_inline_image(tmp_path):
     formatter = FormattingAgent({
         "project_root": str(tmp_path),
@@ -135,6 +149,9 @@ def test_writer_prompt_uses_mobile_kpop_newsletter_style_without_ai_news_tone():
     assert "多用短句" in system_prompt
     assert "不模仿或复制任何具体账号" in system_prompt
     assert "轻快自然的韩娱快讯" in prompt
+    assert "韩娱资讯号快讯" in prompt
+    assert "代词不确定" in system_prompt
+    assert "涉及粉丝、健康或特殊标签" in prompt
     assert "目标约400字" in prompt
     assert "理想350-500字" in prompt
     assert "未确认的服装、动作、表情" in prompt

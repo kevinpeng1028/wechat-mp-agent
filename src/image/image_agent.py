@@ -418,8 +418,12 @@ class ImageAgent(BaseAgent):
             logger.info("[配图Agent] 正文图为空，继续排版")
 
         # 质量最高且最清晰的图片优先作为封面。
+        if self.get_config("topic_agent.image.cover_face_priority", True):
+            for img in valid_downloaded:
+                img["cover_face_score"] = self._cover_face_score(img.get("path", ""))
         valid_downloaded.sort(
             key=lambda item: (
+                item.get("cover_face_score", 0),
                 item.get("quality_score", 0),
                 item.get("blur_score", 0),
                 item.get("file_size", 0),
@@ -750,6 +754,79 @@ class ImageAgent(BaseAgent):
 
         return {"cover": cover, "inline": inline, "footer": footer}
 
+    @staticmethod
+    def _cover_face_score(image_path: str) -> int:
+        """Return a simple cover priority score for images with visible faces."""
+        if not image_path:
+            return 0
+        try:
+            import cv2
+            from PIL import Image as PILImage
+            import numpy as np
+
+            img = PILImage.open(image_path)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            arr = np.array(img)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            cascade_path = (
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            face_cascade = cv2.CascadeClassifier(cascade_path)
+            faces = face_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30)
+            )
+            if len(faces) == 0:
+                return 0
+            height, width = gray.shape[:2]
+            largest = max(faces, key=lambda r: r[2] * r[3])
+            _, fy, fw, fh = largest
+            face_area_ratio = (fw * fh) / max(width * height, 1)
+            upper_bonus = 20 if fy < height * 0.55 else 0
+            return int(60 + min(face_area_ratio * 500, 30) + upper_bonus)
+        except Exception:
+            return 0
+
+    def _create_safe_cover_canvas(self, img, target_ratio: float):
+        """Create a cover canvas that preserves the full subject instead of a body-only crop."""
+        try:
+            from PIL import ImageFilter
+
+            width, height = img.size
+            canvas_w = width
+            canvas_h = max(1, int(canvas_w / target_ratio))
+            if canvas_h > height:
+                canvas_h = height
+                canvas_w = max(1, int(canvas_h * target_ratio))
+
+            bg = img.copy()
+            bg_ratio = bg.size[0] / bg.size[1]
+            if bg_ratio < target_ratio:
+                bg_w = canvas_w
+                bg_h = int(bg_w / bg_ratio)
+            else:
+                bg_h = canvas_h
+                bg_w = int(bg_h * bg_ratio)
+            bg = bg.resize((bg_w, bg_h))
+            left = max(0, (bg_w - canvas_w) // 2)
+            top = max(0, int((bg_h - canvas_h) * 0.30))
+            bg = bg.crop((left, top, left + canvas_w, top + canvas_h))
+            bg = bg.filter(ImageFilter.GaussianBlur(radius=18))
+
+            fg = img.copy()
+            fg_h = canvas_h
+            fg_w = max(1, int(fg_h * width / height))
+            if fg_w > canvas_w:
+                fg_w = canvas_w
+                fg_h = max(1, int(fg_w * height / width))
+            fg = fg.resize((fg_w, fg_h))
+            x = (canvas_w - fg_w) // 2
+            y = max(0, (canvas_h - fg_h) // 2)
+            bg.paste(fg, (x, y))
+            return bg
+        except Exception:
+            return None
+
     def _create_smart_cover(self, image_path: str) -> Optional[str]:
         """
         为封面图创建智能裁剪版本，确保人物头部完整。
@@ -804,14 +881,26 @@ class ImageAgent(BaseAgent):
                     faces = sorted(faces, key=lambda r: r[2] * r[3], reverse=True)
                     fx, fy, fw, fh = faces[0]
                     face_center_y = fy + fh // 2
-                    # 确保脸部在裁剪区域内，且上方有空间
-                    start_y = face_center_y - new_height // 2
-                    # 确保头部上方有足够空间（至少 15% 的新高度）
-                    min_start = max(0, fy - int(new_height * 0.15))
-                    start_y = max(min_start, start_y)
+                    if (
+                        self.get_config("topic_agent.image.avoid_body_only_cover", True)
+                        and new_height < fh * 2.2
+                    ):
+                        cropped = self._create_safe_cover_canvas(img, target_ratio)
+                        if cropped is None:
+                            return None
+                        start_y = 0
+                    else:
+                        # Put face in the upper third and keep headroom.
+                        start_y = face_center_y - int(new_height * 0.35)
+                        max_start_for_headroom = max(0, fy - int(new_height * 0.18))
+                        start_y = min(start_y, max_start_for_headroom)
+                        # Ensure face bottom remains inside the crop.
+                        start_y = min(start_y, fy + fh - int(new_height * 0.68))
+                        # 确保不超出底部
+                        start_y = min(start_y, height - new_height)
+                        start_y = max(0, start_y)
+                        cropped = img.crop((0, start_y, width, start_y + new_height))
                     # 确保不超出底部
-                    start_y = min(start_y, height - new_height)
-                    start_y = max(0, start_y)
                     logger.info(
                         f"[配图Agent] 人脸检测成功: ({fx},{fy},{fw},{fh}), "
                         f"裁剪起始Y={start_y}, 高度={new_height}"
@@ -819,16 +908,20 @@ class ImageAgent(BaseAgent):
                 else:
                     # 无人脸：对竖版图取上方区域（头部通常在上1/3）
                     # 取从 5% 到 5%+new_height 的区域
-                    start_y = int(height * 0.05)
-                    if start_y + new_height > height:
-                        start_y = height - new_height
-                    start_y = max(0, start_y)
+                    if self.get_config("topic_agent.image.avoid_body_only_cover", True):
+                        cropped = self._create_safe_cover_canvas(img, target_ratio)
+                        if cropped is None:
+                            return None
+                        start_y = 0
+                    else:
+                        start_y = int(height * 0.05)
+                        if start_y + new_height > height:
+                            start_y = height - new_height
+                        start_y = max(0, start_y)
+                        cropped = img.crop((0, start_y, width, start_y + new_height))
                     logger.info(
                         f"[配图Agent] 未检测到人脸, 竖版图取上方区域: start_y={start_y}, h={new_height}"
                     )
-
-                # 裁剪
-                cropped = img.crop((0, start_y, width, start_y + new_height))
 
             else:
                 # 横版图片：从宽度方向居中裁剪

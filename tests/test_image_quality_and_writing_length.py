@@ -174,6 +174,25 @@ def test_more_than_half_bad_images_keep_one_valid_image_in_cover_only_mode(tmp_p
     assert result.output["inline_images"] == []
 
 
+def test_safe_cover_canvas_preserves_portrait_subject(tmp_path):
+    portrait = tmp_path / "portrait.jpg"
+    img = Image.new("RGB", (400, 900), "navy")
+    # Simulate a visible face/upper-body area near the top.
+    for x in range(165, 235):
+        for y in range(110, 180):
+            img.putpixel((x, y), (240, 200, 170))
+    img.save(portrait, "JPEG", quality=92)
+
+    agent = object.__new__(ImageAgent)
+    canvas = agent._create_safe_cover_canvas(img, 2.35)
+
+    assert canvas is not None
+    assert abs((canvas.size[0] / canvas.size[1]) - 2.35) < 0.05
+    colors = canvas.getcolors(maxcolors=canvas.size[0] * canvas.size[1])
+    assert colors is not None
+    assert any(color[1][0] > 180 and color[1][1] > 140 for color in colors)
+
+
 def _writer_for_checks():
     writer = object.__new__(WritingAgent)
     writer.config = {
