@@ -46,6 +46,33 @@ def test_sanitizer_removes_legacy_figcaption_and_gray_technical_text():
     assert "figcaption" not in html.lower()
 
 
+def test_sanitizer_removes_marketing_banner_text():
+    formatter = object.__new__(FormattingAgent)
+    html = formatter._sanitize_html(
+        '<section><img src="banner.jpg"><p>评论区炸了!!</p></section>'
+        '<p>BTS V在比利时演唱会上的互动片段引发关注。</p>'
+    )
+
+    assert "评论区炸了" not in html
+    assert "banner.jpg" not in html
+    assert "BTS V在比利时演唱会" in html
+
+
+def test_template_manager_skips_enabled_banner_template_by_default():
+    manager = object.__new__(TemplateManager)
+    manager.config = {"template_system": {"allow_template_banners": False}}
+    manager.templates = {
+        "wechat_banner_template": {
+            "name": "wechat_banner_template",
+            "enabled": True,
+            "has_banner": True,
+            "html": "<section>评论区炸了</section>{{BODY_PARAGRAPHS}}",
+        }
+    }
+
+    assert manager.get_enabled_template() is None
+
+
 def test_formatter_dedupes_repeated_sentences_and_paragraphs():
     formatter = object.__new__(FormattingAgent)
     paragraphs = formatter._dedupe_paragraphs([
@@ -97,6 +124,43 @@ def test_formatter_allows_single_cover_image_without_inline_image(tmp_path):
     assert "<img" not in article["html_content"]
 
 
+def test_formatter_removes_inline_image_matching_cover_url(tmp_path):
+    formatter = FormattingAgent({
+        "project_root": str(tmp_path),
+        "topic_agent": {"image": {
+            "min_valid_images_to_continue": 1,
+            "allow_cover_only_mode": True,
+        }},
+        "formatter_agent": {
+            "image_insertion": {"cover_in_body": False, "rules": {}},
+            "consistency_check": {"threshold": 40},
+            "default_style": {},
+        },
+        "template_system": {"storage_path": "templates.json"},
+    })
+    same = {
+        "url": "https://img.example.com/v.jpg",
+        "position": "cover",
+        "quality_passed": True,
+        "quality_score": 90,
+        "description": "BTS V news photo",
+    }
+    duplicate_inline = dict(same, position="inline")
+    result = asyncio.run(formatter.execute({
+        "written_articles": [{
+            "title": "BTS V最新动态",
+            "summary": "",
+            "content_text": "BTS V公开最新动态。相关消息以官方后续公开为准。",
+            "topic_info": {"title": "BTS V latest update"},
+            "tavily_images": [same, duplicate_inline],
+        }],
+    }))
+
+    article = result.output["formatted_articles"][0]
+    assert article["inline_images"] == []
+    assert '<img src="https://img.example.com/v.jpg"' not in article["html_content"]
+
+
 def test_publisher_allows_cover_only_article_and_skips_inline_upload():
     publisher = PublisherAgent({})
     inline_called = {"value": False}
@@ -123,6 +187,33 @@ def test_publisher_allows_cover_only_article_and_skips_inline_upload():
     assert article is not None
     assert article["thumb_media_id"] == "thumb_media_id"
     assert inline_called["value"] is False
+
+
+def test_publisher_skips_inline_image_matching_cover():
+    publisher = PublisherAgent({})
+    inline_called = {"count": 0}
+
+    async def upload_cover(image, token):
+        return {"media_id": "thumb_media_id"}
+
+    async def upload_inline(html, images, token):
+        inline_called["count"] += len(images)
+        return html
+
+    publisher._upload_cover_image = upload_cover
+    publisher._upload_inline_images_and_replace = upload_inline
+
+    article = asyncio.run(publisher._prepare_draft_article({
+        "title": "BTS V最新动态",
+        "summary": "摘要",
+        "html_content": "<section><p>正文内容</p></section>",
+        "cover_image": {"url": "https://img.example.com/v.jpg", "position": "cover"},
+        "valid_images": [{"url": "https://img.example.com/v.jpg", "position": "cover"}],
+        "inline_images": [{"url": "https://img.example.com/v.jpg", "position": "inline"}],
+    }, "token"))
+
+    assert article is not None
+    assert inline_called["count"] == 0
 
 
 def test_writer_prompt_uses_mobile_kpop_newsletter_style_without_ai_news_tone():
@@ -159,6 +250,28 @@ def test_writer_prompt_uses_mobile_kpop_newsletter_style_without_ai_news_tone():
     assert "原文事实清单" in prompt
     assert "事实内容保持85%-90%以上一致" in prompt
     assert "不新增事实" in prompt
+
+
+def test_writer_post_process_removes_sensitive_title_repetition_pronouns_and_ai_summary():
+    writer = object.__new__(WritingAgent)
+    parsed = writer._post_process_article({
+        "title": "BTS V与唐氏综合征粉丝暖心互动",
+        "summary": "唐氏综合征粉丝互动",
+        "content_text": (
+            "7月1日和2日，V随防弹少年团在比利时布鲁塞尔国王鲍杜安体育场举行世界巡演“ARIRANG”演唱会。"
+            "7月1日和2日，V随防弹少年团在比利时布鲁塞尔国王鲍杜安体育场举行世界巡演“ARIRANG”演唱会。"
+            "V看到台下有粉丝在哭，便脱下身上的外套送给她。"
+            "两人就这样沉浸在同频的快乐里，但更打动人的是那份真诚的关怀。"
+        ),
+    })
+
+    assert "唐氏综合征粉丝" not in parsed["title"]
+    assert "唐氏综合征粉丝" not in parsed["summary"]
+    assert parsed["content_text"].count("7月1日和2日") == 1
+    assert "送给她" not in parsed["content_text"]
+    assert "递给对方" in parsed["content_text"]
+    assert "真诚的关怀" not in parsed["content_text"]
+    assert "同频的快乐里" not in parsed["content_text"]
 
 
 def test_writer_fidelity_rejects_invented_reactions_company_and_macro_analysis():

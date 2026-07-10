@@ -143,6 +143,9 @@ topic_agent:
     cover_face_priority: true
     avoid_body_only_cover: true
     cover_crop_mode: "smart_center_or_face"
+    use_collage_cover: false
+    cover_only_mode_no_inline_image: true
+    dedupe_cover_and_inline_images: true
     min_width: 480
     min_height: 320
     min_file_size_kb: 25
@@ -388,6 +391,8 @@ template_system:
   storage_path: "config/templates/templates.json"
   # 默认启用的模板（null=使用系统默认排版）
   default_template: null
+  allow_template_banners: false
+  allow_marketing_banners: false
   # 模板优先级
   priority:
     - "article_specified"          # 文章指定模板

@@ -417,6 +417,19 @@ class ImageAgent(BaseAgent):
             logger.warning("[配图Agent] ⚠️ 仅1张有效图片，进入封面图模式")
             logger.info("[配图Agent] 正文图为空，继续排版")
 
+        before_dedupe = len(valid_downloaded)
+        valid_downloaded = self._dedupe_images(valid_downloaded)
+        if len(valid_downloaded) != before_dedupe:
+            logger.info(
+                f"[配图Agent] 图片去重: {before_dedupe} → {len(valid_downloaded)}"
+            )
+        cover_only_mode = (
+            len(valid_downloaded) == 1
+            and bool(self.get_config("topic_agent.image.allow_cover_only_mode", True))
+        )
+        if cover_only_mode:
+            quality_warning = "仅1张有效图片，进入封面图模式"
+
         # 质量最高且最清晰的图片优先作为封面。
         if self.get_config("topic_agent.image.cover_face_priority", True):
             for img in valid_downloaded:
@@ -437,12 +450,17 @@ class ImageAgent(BaseAgent):
         # Step 5: 为封面图生成智能裁剪版本（确保人物头部完整）
         if categorized["cover"]:
             cover = categorized["cover"][0]
-            smart_path = self._create_smart_cover(cover["path"])
-            if smart_path:
-                cover["original_path"] = cover["path"]
-                cover["path"] = smart_path
-                cover["filename"] = Path(smart_path).name
-                logger.info(f"[配图Agent] ✅ 封面图智能裁剪: {cover['filename']}")
+            if cover_only_mode and not self.get_config(
+                "topic_agent.image.use_collage_cover", False
+            ):
+                logger.info("[配图Agent] cover_only_mode=True，单图直接作为封面，不生成拼图/复合封面")
+            else:
+                smart_path = self._create_smart_cover(cover["path"])
+                if smart_path:
+                    cover["original_path"] = cover["path"]
+                    cover["path"] = smart_path
+                    cover["filename"] = Path(smart_path).name
+                    logger.info(f"[配图Agent] ✅ 封面图智能裁剪: {cover['filename']}")
 
         logger.info(
             f"[配图Agent] ✅ 下载完成: 共 {len(valid_downloaded)} 张 | "
@@ -467,6 +485,50 @@ class ImageAgent(BaseAgent):
                 "rejected_image_count": len(quality_rejected),
             },
         )
+
+    @classmethod
+    def _image_identity(cls, image: Dict) -> str:
+        for key in ("url", "source_url", "path", "original_path"):
+            value = image.get(key)
+            if value:
+                return f"{key}:{str(value).strip().lower().replace(chr(92), '/')}"
+        return ""
+
+    @staticmethod
+    def _average_image_hash(path: str) -> str:
+        if not path or not Path(path).exists():
+            return ""
+        try:
+            from PIL import Image as PILImage
+            img = PILImage.open(path).convert("L").resize((8, 8))
+            pixels = list(img.getdata())
+            avg = sum(pixels) / len(pixels)
+            bits = "".join("1" if p >= avg else "0" for p in pixels)
+            return f"{int(bits, 2):016x}"
+        except Exception:
+            return ""
+
+    @classmethod
+    def _dedupe_images(cls, images: List[Dict]) -> List[Dict]:
+        seen_ids = set()
+        seen_hashes = set()
+        deduped = []
+        for image in images:
+            identity = cls._image_identity(image)
+            img_hash = cls._average_image_hash(image.get("path", ""))
+            if identity and identity in seen_ids:
+                logger.info(f"[配图Agent] 跳过重复图片: {identity[:80]}")
+                continue
+            if img_hash and img_hash in seen_hashes:
+                logger.info(f"[配图Agent] 跳过相同hash图片: {img_hash}")
+                continue
+            if identity:
+                seen_ids.add(identity)
+            if img_hash:
+                image["image_hash"] = img_hash
+                seen_hashes.add(img_hash)
+            deduped.append(image)
+        return deduped
 
     @staticmethod
     def _assess_image_relevance(topic_info: Dict, image: Dict) -> Dict[str, Any]:

@@ -301,6 +301,7 @@ class WeChatMPOrchestrator:
                 "tavily_images": tavily_images,
                 "topic_info": article.get("topic_info", {}),
                 "position": article.get("position", "unknown"),
+                "cover_only_mode": article.get("cover_only_mode", False),
             })
         return formatted
 

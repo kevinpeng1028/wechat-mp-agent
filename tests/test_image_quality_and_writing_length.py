@@ -193,6 +193,49 @@ def test_safe_cover_canvas_preserves_portrait_subject(tmp_path):
     assert any(color[1][0] > 180 and color[1][1] > 140 for color in colors)
 
 
+def test_cover_only_single_image_does_not_generate_collage_or_smart_crop(tmp_path):
+    sharp = tmp_path / "sharp.jpg"
+    _save_sharp_photo(sharp)
+
+    agent = object.__new__(ImageAgent)
+    agent.get_config = lambda key, default=None: {
+        "topic_agent.image.min_valid_images_to_continue": 1,
+        "topic_agent.image.allow_cover_only_mode": True,
+        "topic_agent.image.use_collage_cover": False,
+        "topic_agent.image.cover_face_priority": False,
+    }.get(key, default)
+    agent.image_dir = tmp_path
+
+    async def fetch_og(_):
+        return None
+
+    async def download(url, info, idx):
+        return {
+            "path": str(sharp),
+            "filename": sharp.name,
+            "source_url": url,
+            "file_size": sharp.stat().st_size,
+            "description": "BTS V",
+        }
+
+    def fail_smart_crop(_):
+        raise AssertionError("cover_only_mode should not create collage/smart crop")
+
+    agent._fetch_og_image = fetch_og
+    agent._download_image = download
+    agent._create_smart_cover = fail_smart_crop
+
+    result = asyncio.run(agent.execute({
+        "topic_info": {"title": "BTS V concert update"},
+        "tavily_images": [{"url": "https://img.example.com/v.jpg"}],
+    }))
+
+    assert result.is_success is True
+    assert result.output["cover_only_mode"] is True
+    assert result.output["cover_image"]["path"] == str(sharp)
+    assert result.output["inline_images"] == []
+
+
 def _writer_for_checks():
     writer = object.__new__(WritingAgent)
     writer.config = {

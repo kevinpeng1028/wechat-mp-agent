@@ -264,6 +264,8 @@ class WritingAgent(BaseAgent):
                     fallback_reason=check_result["hard_issues"],
                 )
 
+            parsed = self._post_process_article(parsed)
+
             # 组装结果
             word_count = len(parsed.get("content_text", "").replace(" ", ""))
 
@@ -665,6 +667,98 @@ class WritingAgent(BaseAgent):
 
         return None
 
+    @staticmethod
+    def _normalize_for_dedupe(text: str) -> str:
+        text = (text or "").lower()
+        text = text.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+        text = re.sub(r"\s+", "", text)
+        text = re.sub(r"[，。！？、,.!?；;：:《》\"'（）()\[\]【】\-—~·]", "", text)
+        return text
+
+    @staticmethod
+    def _fact_signature(text: str) -> str:
+        text = text or ""
+        dates = "".join(re.findall(r"\d{1,2}月\d{1,2}日|\d{4}年|\d{1,2}日", text))
+        places = "".join(re.findall(r"比利时|布鲁塞尔|国王鲍杜安体育场|高雄|首尔|日本|韩国", text))
+        events = "".join(re.findall(r"ARIRANG|演唱会|世界巡演|巡演|见面会|MV|专辑", text, re.I))
+        artists = "".join(re.findall(r"BTS|防弹少年团|V|金泰亨|BLACKPINK|IVE|ITZY|TWS|NewJeans", text, re.I))
+        return f"{dates}|{places}|{events.lower()}|{artists.lower()}"
+
+    def _dedupe_content_sentences(self, content: str) -> str:
+        parts = re.split(r"(?<=[。！？!?])|\n+", content or "")
+        seen = set()
+        fact_seen = set()
+        kept = []
+        removed = []
+        for part in parts:
+            sentence = part.strip()
+            if not sentence:
+                continue
+            norm = self._normalize_for_dedupe(sentence)
+            fact_sig = self._fact_signature(sentence)
+            duplicate = bool(norm and norm in seen)
+            if not duplicate:
+                meaningful = fact_sig.replace("|", "")
+                if len(meaningful) >= 8 and fact_sig in fact_seen:
+                    duplicate = True
+            if duplicate:
+                removed.append(sentence)
+                continue
+            if norm:
+                seen.add(norm)
+            if fact_sig.replace("|", ""):
+                fact_seen.add(fact_sig)
+            kept.append(sentence)
+        logger.info(
+            f"[写作Agent] 正文去重: {len([p for p in parts if p.strip()])} → {len(kept)} 句 | 删除={removed[:3]}"
+        )
+        return "\n\n".join(kept)
+
+    @staticmethod
+    def _sanitize_sensitive_title(title: str) -> str:
+        title = title or ""
+        replacements = {
+            "唐氏综合征粉丝": "现场粉丝",
+            "患有唐氏综合征的粉丝": "现场粉丝",
+            "特殊粉丝": "现场粉丝",
+        }
+        for old, new in replacements.items():
+            title = title.replace(old, new)
+        return title
+
+    @staticmethod
+    def _sanitize_sensitive_content(content: str) -> str:
+        content = content or ""
+        ai_phrases = [
+            "成了粉丝们心中难忘的画面",
+            "两人就这样沉浸在同频的快乐里",
+            "同频的快乐里",
+            "但更打动人的是那份真诚的关怀",
+            "真诚的关怀",
+        ]
+        for phrase in ai_phrases:
+            content = content.replace(phrase, "")
+        content = re.sub(r"(粉丝[^。！？!?]{0,20})[她他](?=[，。！？!?])", r"\1对方", content)
+        content = re.sub(r"送给[她他对方]", "递给对方", content)
+        content = re.sub(r"安抚[她他]", "安抚对方", content)
+        content = re.sub(r"[，,]\s*[。！？!?]", "。", content)
+        content = re.sub(r"。\s*。+", "。", content)
+        return content
+
+    def _post_process_article(self, parsed: Dict) -> Dict:
+        processed = dict(parsed)
+        processed["title"] = self._sanitize_sensitive_title(processed.get("title", ""))
+        processed["summary"] = self._sanitize_sensitive_title(processed.get("summary", ""))
+        content = self._sanitize_sensitive_content(processed.get("content_text", ""))
+        content = self._dedupe_content_sentences(content)
+        processed["content_text"] = content
+        processed["content_html"] = "".join(
+            f"<p>{p.strip()}</p>"
+            for p in re.split(r"\n{2,}", content)
+            if p.strip()
+        )
+        return processed
+
     def _strict_check(
         self, parsed: Dict, short_news_mode: bool = False
     ) -> Dict:
@@ -862,17 +956,18 @@ class WritingAgent(BaseAgent):
         images = tavily_images if tavily_images is not None else topic.get(
             "_tavily_images", []
         )
-        return {
-            "is_success": True,
+        processed = self._post_process_article({
             "title": title,
             "summary": f"{subject}最新公开动态的事实整理。",
             "content_text": content,
-            "content_html": "".join(
-                f"<p>{paragraph}</p>"
-                for paragraph in re.split(r"(?<=[。])", content)
-                if paragraph.strip()
-            ),
-            "word_count": len(content.replace(" ", "")),
+        })
+        return {
+            "is_success": True,
+            "title": processed["title"],
+            "summary": processed["summary"],
+            "content_text": processed["content_text"],
+            "content_html": processed["content_html"],
+            "word_count": len(processed["content_text"].replace(" ", "")),
             "source_articles": source_articles or [topic],
             "tavily_images": images,
             "topic_info": topic,
