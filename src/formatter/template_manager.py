@@ -105,10 +105,30 @@ class TemplateManager:
 
     def get_enabled_template(self) -> Optional[Dict]:
         """获取默认启用的模板"""
+        allow_banners = self.config.get("template_system", {}).get(
+            "allow_template_banners", False
+        )
         for name, tmpl in self.templates.items():
             if tmpl.get("enabled", False):
+                if not allow_banners and self._is_banner_template(tmpl):
+                    logger.info(f"[模板] 跳过默认Banner/营销模板: {name}")
+                    continue
                 return tmpl
         return None
+
+    @staticmethod
+    def _is_banner_template(template: Dict) -> bool:
+        html = (template.get("html") or "").lower()
+        name = (template.get("name") or "").lower()
+        source = (template.get("source") or "").lower()
+        marketing_words = [
+            "banner", "评论区炸了", "震惊", "爆了", "吃瓜",
+            "hot banner", "reaction banner", "yellow banner",
+        ]
+        return bool(template.get("has_banner")) or any(
+            word in html or word in name or word in source
+            for word in marketing_words
+        )
 
     def list_templates(self) -> List[Dict]:
         """列出所有模板"""
@@ -134,6 +154,14 @@ class TemplateManager:
         if article_template_name:
             tmpl = self.get_template(article_template_name)
             if tmpl:
+                allow_banners = self.config.get("template_system", {}).get(
+                    "allow_template_banners", False
+                )
+                if not allow_banners and self._is_banner_template(tmpl):
+                    logger.info(
+                        f"[模板] 跳过文章指定Banner/营销模板: {article_template_name}"
+                    )
+                    return None
                 logger.info(f"[模板] 使用文章指定模板: {article_template_name}")
                 return tmpl
 
@@ -447,14 +475,8 @@ class TemplateManager:
         return f'<img src="{url}" style="width:100%;max-width:100%;height:auto;display:block;margin:18px auto;border-radius:6px;object-fit:contain;" />'
 
     def _render_caption(self, img: Dict, template: Dict) -> str:
-        """使用模板渲染图片说明"""
-        caption = img.get("caption", img.get("description", ""))
-        if not caption:
-            return ""
-        return (
-            f'<p style="font-size:13px;line-height:1.6;color:#999999;'
-            f'text-align:center;margin:-6px 0 18px;">{self._escape(caption)}</p>'
-        )
+        """默认不展示自动图片说明、文件名或技术元数据。"""
+        return ""
 
     def _render_image_default(self, img: Dict, img_cfg: Dict) -> str:
         """默认排版渲染图片"""
@@ -471,18 +493,8 @@ class TemplateManager:
         )
 
     def _render_caption_default(self, img: Dict, cap_cfg: Dict) -> str:
-        """默认排版渲染图片说明"""
-        caption = img.get("caption", img.get("description", ""))
-        if not caption:
-            return ""
-        return (
-            f'<p style="font-size:{cap_cfg.get("font_size","13px")};'
-            f'line-height:{cap_cfg.get("line_height","1.6")};'
-            f'color:{cap_cfg.get("color","#999999")};'
-            f'text-align:{cap_cfg.get("text_align","center")};'
-            f'margin:{cap_cfg.get("margin","-6px 0 18px")};">'
-            f'{self._escape(caption)}</p>'
-        )
+        """默认不展示自动图片说明、文件名或技术元数据。"""
+        return ""
 
     def _render_intro(self, intro: str, template: Dict) -> str:
         """渲染导语段"""

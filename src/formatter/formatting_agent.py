@@ -36,7 +36,7 @@ class FormattingAgent(BaseAgent):
         super().__init__(config)
         self.template_mgr = TemplateManager(config or {})
         self.consistency_checker = ImageConsistencyChecker(config or {})
-        self.paragraph_rules = (config or {}).get(
+        self.paragraph_rules = self.get_config(
             "formatter_agent.paragraph_split", {}
         )
 
@@ -130,6 +130,29 @@ class FormattingAgent(BaseAgent):
 
         # 使用过滤后的有效图片
         valid_images = consistency.get("valid_images", tavily_images)
+        valid_images = self._dedupe_images(valid_images)
+        cover_image = valid_images[0] if valid_images else None
+        cover_only_mode = (
+            bool(article.get("cover_only_mode")) or len(valid_images) == 1
+            and self.get_config("topic_agent.image.allow_cover_only_mode", True)
+        )
+        cover_in_body = self.get_config(
+            "formatter_agent.image_insertion.cover_in_body", False
+        )
+        if cover_in_body:
+            render_images = valid_images
+        else:
+            render_images = [
+                img for img in valid_images
+                if img.get("position") not in ("cover", "thumb", "cover_image")
+            ]
+        render_images = self._dedupe_inline_against_cover(
+            cover_image, render_images
+        )
+        if cover_only_mode:
+            render_images = []
+            logger.warning("[排版Agent] ⚠️ 仅1张有效图片，进入封面图模式")
+            logger.info("[排版Agent] cover_only_mode=True | inline_images=0 | 正文图为空，跳过正文图插入")
 
         # Step 2: 提取导语和结尾
         intro = self._extract_intro(content_text)
@@ -169,6 +192,7 @@ class FormattingAgent(BaseAgent):
             max_chars=self.paragraph_rules.get("max_chars", 90),
             split_threshold=self.paragraph_rules.get("split_threshold", 120),
         )
+        paragraphs = self._dedupe_paragraphs(paragraphs)
 
         # 再次检查：移除末尾与结尾重复的段落
         if ending and paragraphs:
@@ -178,6 +202,7 @@ class FormattingAgent(BaseAgent):
                 paragraphs.pop()
             elif last_para.endswith(ending_clean):
                 paragraphs[-1] = last_para[:last_para.rfind(ending_clean)].rstrip("。")
+        paragraphs = self._dedupe_paragraphs(paragraphs)
 
         # Step 5: 解析模板
         template = self.template_mgr.resolve_template(
@@ -191,7 +216,7 @@ class FormattingAgent(BaseAgent):
             summary=summary,
             intro=intro,
             body_paragraphs=paragraphs,
-            images=valid_images,
+            images=render_images,
             ending=ending,
         )
 
@@ -207,16 +232,122 @@ class FormattingAgent(BaseAgent):
             "word_count": len(content_text.replace(" ", "")),
             "paragraph_count": len(paragraphs),
             "image_count": len(valid_images),
+            "cover_only_mode": cover_only_mode,
             "consistency_score": consistency.get("consistency_score", 0),
             "template_used": template.get("name") if template else "system_default",
             "position": article.get("position", "unknown"),
             # 传递给发布Agent
             "valid_images": valid_images,
-            "cover_image": valid_images[0] if valid_images else None,
-            "inline_images": valid_images[1:] if len(valid_images) > 1 else [],
+            "cover_image": cover_image,
+            "inline_images": render_images,
         }
 
         return result
+
+    @staticmethod
+    def _image_identity(image: Dict) -> str:
+        for key in ("url", "source_url", "path", "original_path"):
+            value = image.get(key)
+            if value:
+                return f"{key}:{str(value).strip().lower().replace(chr(92), '/')}"
+        return ""
+
+    @staticmethod
+    def _average_image_hash(path: str) -> str:
+        if not path or not Path(path).exists():
+            return ""
+        try:
+            from PIL import Image as PILImage
+            img = PILImage.open(path).convert("L").resize((8, 8))
+            pixels = list(img.getdata())
+            avg = sum(pixels) / len(pixels)
+            bits = "".join("1" if p >= avg else "0" for p in pixels)
+            return f"{int(bits, 2):016x}"
+        except Exception:
+            return ""
+
+    @classmethod
+    def _dedupe_images(cls, images: List[Dict]) -> List[Dict]:
+        seen_ids = set()
+        seen_hashes = set()
+        deduped = []
+        for image in images:
+            identity = cls._image_identity(image)
+            img_hash = image.get("image_hash") or cls._average_image_hash(
+                image.get("path", "")
+            )
+            if identity and identity in seen_ids:
+                continue
+            if img_hash and img_hash in seen_hashes:
+                continue
+            if identity:
+                seen_ids.add(identity)
+            if img_hash:
+                image["image_hash"] = img_hash
+                seen_hashes.add(img_hash)
+            deduped.append(image)
+        return deduped
+
+    @classmethod
+    def _dedupe_inline_against_cover(
+        cls, cover_image: Optional[Dict], inline_images: List[Dict]
+    ) -> List[Dict]:
+        if not cover_image:
+            return cls._dedupe_images(inline_images)
+        cover_ids = {
+            cls._image_identity(cover_image),
+            cls._average_image_hash(cover_image.get("path", "")),
+            cover_image.get("image_hash", ""),
+        }
+        cover_ids = {item for item in cover_ids if item}
+        kept = []
+        for image in cls._dedupe_images(inline_images):
+            image_ids = {
+                cls._image_identity(image),
+                image.get("image_hash", ""),
+                cls._average_image_hash(image.get("path", "")),
+            }
+            if cover_ids.intersection({item for item in image_ids if item}):
+                logger.info("[排版Agent] 删除与封面重复的正文图")
+                continue
+            kept.append(image)
+        return kept
+
+    @staticmethod
+    def _normalize_sentence_for_dedupe(text: str) -> str:
+        return re.sub(r"\s+", "", text.strip("。！？!?，,；;：: "))
+
+    def _dedupe_paragraphs(self, paragraphs: List[str]) -> List[str]:
+        """Remove repeated sentences/paragraphs without changing factual content."""
+        seen_sentences = set()
+        seen_paragraphs = set()
+        cleaned = []
+
+        for para in paragraphs:
+            para = (para or "").strip()
+            if not para:
+                continue
+            para_key = self._normalize_sentence_for_dedupe(para)
+            if para_key in seen_paragraphs:
+                continue
+            seen_paragraphs.add(para_key)
+
+            parts = re.split(r"(?<=[。！？!?])", para)
+            kept = []
+            for part in parts:
+                sentence = part.strip()
+                if not sentence:
+                    continue
+                key = self._normalize_sentence_for_dedupe(sentence)
+                if len(key) >= 12 and key in seen_sentences:
+                    continue
+                if len(key) >= 12:
+                    seen_sentences.add(key)
+                kept.append(sentence)
+            if kept:
+                cleaned.append("".join(kept))
+
+        return cleaned
 
     def _extract_intro(self, text: str) -> str:
         """提取导语段（正文前1-2句）"""
@@ -247,12 +378,42 @@ class FormattingAgent(BaseAgent):
 
     def _sanitize_html(self, html: str) -> str:
         """清理HTML，确保兼容微信公众号"""
+        marketing_pattern = (
+            r"(评论区炸了|震惊|爆了|吃瓜|刚更新的韩娱热点|"
+            r"点个关注|下一条瓜不迷路|yellow banner|reaction banner|hot banner)"
+        )
+        html = re.sub(
+            rf'<section[^>]*>.*?{marketing_pattern}.*?</section>',
+            '',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        html = re.sub(
+            rf'<p[^>]*>.*?{marketing_pattern}.*?</p>',
+            '',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
         # 移除 <script> 标签
         html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
         # 移除 <iframe> 标签
         html = re.sub(r'<iframe[^>]*>.*?</iframe>', '', html, flags=re.DOTALL | re.IGNORECASE)
         # 移除外部 CSS link
         html = re.sub(r'<link[^>]*rel=["\']stylesheet["\'][^>]*>', '', html, flags=re.IGNORECASE)
+        # 默认移除所有图片说明，避免文件名、URL、Tavily 描述等技术文字
+        html = re.sub(
+            r'<figcaption[^>]*>.*?</figcaption>',
+            '',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        html = re.sub(
+            r'<p[^>]*style=["\'][^"\']*(?:font-size\s*:\s*13px|'
+            r'color\s*:\s*#999999)[^"\']*["\'][^>]*>.*?</p>',
+            '',
+            html,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
         return html
 
     async def _save_html(self, article: Dict):

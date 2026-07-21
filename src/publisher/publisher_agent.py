@@ -161,8 +161,19 @@ class PublisherAgent(BaseAgent):
 
         # 上传正文图并替换HTML中的路径（同时移除上传失败的图片及说明）
         valid_images = article.get("valid_images", [])
-        if valid_images:
-            html = await self._upload_inline_images_and_replace(html, valid_images, token)
+        inline_images = article.get("inline_images")
+        if inline_images is None:
+            inline_images = [
+                img for img in valid_images
+                if img.get("position") not in ("cover", "thumb", "cover_image")
+            ]
+        inline_images = self._dedupe_inline_against_cover(
+            cover_image, inline_images
+        )
+        if inline_images:
+            html = await self._upload_inline_images_and_replace(html, inline_images, token)
+        else:
+            logger.info("[发布Agent] 正文图为空，跳过正文图上传")
 
         # 如果没有封面图 media_id，尝试使用正文第一张图
         if not thumb_media_id and valid_images:
@@ -202,6 +213,41 @@ class PublisherAgent(BaseAgent):
             "position": article.get("position", "unknown"),
             "digest": summary[:64] if summary else title[:64],
         }
+
+    @staticmethod
+    def _image_identity(image: Optional[Dict]) -> str:
+        if not image:
+            return ""
+        for key in ("url", "source_url", "path", "original_path"):
+            value = image.get(key)
+            if value:
+                return f"{key}:{str(value).strip().lower().replace(chr(92), '/')}"
+        return ""
+
+    @classmethod
+    def _dedupe_inline_against_cover(
+        cls, cover_image: Optional[Dict], inline_images: List[Dict]
+    ) -> List[Dict]:
+        cover_id = cls._image_identity(cover_image)
+        seen = set()
+        kept = []
+        for image in inline_images or []:
+            identity = cls._image_identity(image)
+            image_hash = image.get("image_hash", "")
+            marker = identity or image_hash
+            if marker and marker in seen:
+                continue
+            if cover_id and identity == cover_id:
+                logger.info("[发布Agent] 正文图与封面重复，跳过正文图上传")
+                continue
+            cover_hash = (cover_image or {}).get("image_hash", "")
+            if cover_hash and image_hash and cover_hash == image_hash:
+                logger.info("[发布Agent] 正文图hash与封面重复，跳过正文图上传")
+                continue
+            if marker:
+                seen.add(marker)
+            kept.append(image)
+        return kept
 
     async def _upload_cover_image(self, image_info: Dict, token: str) -> Optional[Dict]:
         """上传封面图（使用缩略图上传接口获取 thumb_media_id）"""

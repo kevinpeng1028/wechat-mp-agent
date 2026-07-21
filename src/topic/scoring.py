@@ -111,20 +111,172 @@ class ScoringSystem:
         "Yun", "ISA", "Bae", "Lia", "Sie", "Shy", "The8",
     }
 
+    ARTIST_ENTITY_ALIASES = {
+        "BTS": ["BTS", "방탄소년단", "防弹少年团", "防弹", "Bangtan"],
+        "BTS_JIN": [
+            "BTS Jin", "방탄소년단 진", "김석진",
+            "Kim Seokjin", "金硕珍",
+        ],
+        "IVE": ["IVE", "아이브", "アイヴ", "爱芙"],
+        "ITZY": ["ITZY", "있지"],
+        "IDLE": ["i-dle", "(G)I-DLE", "여자아이들", "(여자)아이들", "아이들"],
+        "STRAY_KIDS_HAN": [
+            "Stray Kids Han", "SKZ Han", "스트레이키즈 한",
+            "한지성", "Han Jisung", "HAN of Stray Kids",
+            "Stray Kids member Han",
+        ],
+        "BIGBANG_DAESUNG": [
+            "BIGBANG Daesung", "BIGBANG 대성", "빅뱅 대성",
+            "Daesung", "Kang Daesung", "강대성",
+        ],
+        "ENHYPEN": ["ENHYPEN", "엔하이픈"],
+        "ENHYPEN_JUNGWON": ["Jungwon", "정원", "양정원", "Yang Jungwon"],
+        "ENHYPEN_HEESEUNG": ["Heeseung", "희승", "이희승", "Lee Heeseung"],
+        "ENHYPEN_JAY": ["Jay", "제이", "박종성", "Park Jongseong"],
+        "ENHYPEN_JAKE": ["Jake", "제이크", "심재윤", "Sim Jaeyun"],
+        "ENHYPEN_SUNGHOON": ["Sunghoon", "성훈", "박성훈", "Park Sunghoon"],
+        "ENHYPEN_SUNOO": ["Sunoo", "선우", "김선우", "Kim Sunoo"],
+        "ENHYPEN_NIKI": ["Ni-ki", "Niki", "니키", "西村力"],
+        "STRAY_KIDS": [
+            "Stray Kids", "SKZ", "스트레이키즈", "스트레이 키즈", "스키즈",
+        ],
+        "KISS_OF_LIFE": [
+            "KISS OF LIFE", "KIOF", "키스오브라이프", "키스 오브 라이프",
+        ],
+        "LE_SSERAFIM": ["LE SSERAFIM", "르세라핌"],
+        "AESPA": ["aespa", "에스파"],
+        "BLACKPINK": ["BLACKPINK", "블랙핑크"],
+        "NMIXX": ["NMIXX", "엔믹스"],
+        "ZEROBASEONE": ["ZEROBASEONE", "ZB1", "제로베이스원"],
+        "BOYNEXTDOOR": ["BOYNEXTDOOR", "보이넥스트도어"],
+        "ATEEZ": ["ATEEZ", "에이티즈"],
+        "THE_BOYZ": ["THE BOYZ", "더보이즈"],
+        "TREASURE": ["TREASURE", "트레저"],
+        "82MAJOR": ["82MAJOR", "82메이저"],
+        "CRAVITY": ["CRAVITY", "크래비티"],
+        "P1HARMONY": ["P1Harmony", "피원하모니"],
+        "TWS": ["TWS", "투어스"],
+        "ILLIT": ["ILLIT", "아일릿"],
+        "KATSEYE": ["KATSEYE", "캣츠아이"],
+        "MEOVV": ["MEOVV", "미야오"],
+        "CORTIS": ["CORTIS", "코르티스"],
+        "ALLDAY_PROJECT": ["ALLDAY PROJECT", "올데이 프로젝트"],
+        "NEWJEANS": ["NewJeans", "뉴진스"],
+        "NEWJEANS_DANIELLE": ["Danielle", "다니엘"],
+        "MIN_HEE_JIN": ["Min Hee-jin", "Min Heejin", "민희진", "闵熙珍"],
+    }
+
+    @classmethod
+    def detect_artist_entities(cls, text: str) -> set:
+        """将韩/英/中/日别名归一到同一艺人实体。"""
+        entities = set()
+        mapped_aliases = {
+            alias.casefold()
+            for aliases in cls.ARTIST_ENTITY_ALIASES.values()
+            for alias in aliases
+        }
+        for entity, aliases in cls.ARTIST_ENTITY_ALIASES.items():
+            if any(cls._match_star(alias, text) for alias in aliases):
+                entities.add(entity)
+        for star in cls.TOP_STARS:
+            if (
+                "BTS_JIN" in entities
+                and star in {"Jin", "진"}
+            ):
+                continue
+            if (
+                star.casefold() not in mapped_aliases
+                and cls._match_star(star, text)
+            ):
+                entities.add(star)
+        return entities
+
     @classmethod
     def _match_star(cls, star: str, text: str) -> bool:
-        """检查文本中是否包含明星名（短英文名用单词边界，韩文名用子串）"""
+        """严格匹配艺人名；短团名需要词边界和 K-pop 上下文。"""
+        import re
+
+        kpop_context = (
+            r"k-?pop|idol|hybe|bighit|sm(?: entertainment)?|"
+            r"jyp(?: entertainment)?|yg(?: entertainment)?|starship|ador|"
+            r"source music|girl group|boy group|comeback|music video|\bmv\b|"
+            r"teaser|album|concert|fans?|netizens?|airport|fashion week|"
+            r"music show|member|wonyoung|yujin|gaeul|\brei\b|\bliz\b|leeseo|"
+            r"taehyung|jungkook|jimin|suga|\bjin\b|jennie|lisa|karina|"
+            r"回归|组合|成员|巡演|演唱会|音乐节目|爱豆|"
+            r"월드투어|공연|매진|공항|출국|입국|음악방송|콘서트"
+        )
+
+        if star == "V":
+            return bool(re.search(
+                r"(?:\bBTS(?:'s)?\s+V\b|\bV\s+of\s+BTS\b|"
+                r"\bKim\s+Taehyung\b|\bTaehyung\b)",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
+        if star == "Ten":
+            return bool(re.search(
+                r"(?:\bNCT\s+Ten\b|\bWayV\s+Ten\b|\bTen\s+Lee\b|"
+                r"\bChittaphon(?:\s+Leechaiyapornkul)?\b)",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
+        if star in {"한", "Han"}:
+            return bool(re.search(
+                r"(?:\bStray\s+Kids(?:\s+member)?\s+Han\b|"
+                r"\bSKZ\s+Han\b|\bHAN\s+of\s+Stray\s+Kids\b|"
+                r"스트레이키즈\s*한(?![가-힣])|한지성|"
+                r"\bHan\s+Jisung\b)",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
+        if star in {"대성", "Daesung"}:
+            if re.search(r"대성(?:황|공|리|동)", text):
+                return False
+            return bool(re.search(
+                r"(?:BIGBANG\s+(?:대성|Daesung)|빅뱅\s+대성|"
+                r"\bKang\s+Daesung\b|\bDaesung\b|강대성|"
+                r"(?<![가-힣])대성(?![가-힣]).{0,20}"
+                r"(?:빅뱅|멤버|솔로|콘서트|컴백)|"
+                r"(?:빅뱅|멤버|솔로|콘서트|컴백).{0,20}"
+                r"(?<![가-힣])대성(?![가-힣]))",
+                text,
+                flags=re.IGNORECASE,
+            ))
+
+        if star == "IVE":
+            # 保留大小写以排除 Jony Ive、I've、Ive-designed。
+            has_name = bool(re.search(r"(?<![A-Za-z])IVE(?:'s)?(?![A-Za-z-])", text))
+            return has_name and bool(re.search(kpop_context, text, re.IGNORECASE))
+
+        if star in {"TXT", "NCT", "ITZY", "RIIZE"}:
+            has_name = bool(re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(star)}(?:'s)?(?![A-Za-z0-9-])",
+                text,
+            ))
+            return has_name and bool(re.search(kpop_context, text, re.IGNORECASE))
+
         star_lower = star.lower()
         text_lower = text.lower()
-        
-        if star in cls.SHORT_ENGLISH_STARS:
-            # 短英文名用单词边界匹配
-            import re
-            pattern = r'\b' + re.escape(star_lower) + r'\b'
+
+        if re.search(r"[A-Za-z]", star):
+            # 所有拉丁字母艺人名都使用严格边界，避免 Ten→attends、
+            # Ive→creative 等普通单词子串误判。
+            pattern = (
+                r"(?<![A-Za-z0-9])"
+                + re.escape(star_lower)
+                + r"(?![A-Za-z0-9])"
+            )
             return bool(re.search(pattern, text_lower))
-        else:
-            # 韩文名和长英文名用子串匹配
-            return star_lower in text_lower
+
+        # 韩文名允许常见助词，但不能匹配普通词内部。
+        particles = r"(?:은|는|이|가|을|를|의|도|과|와|로|으로)?"
+        return bool(re.search(
+            rf"(?<![가-힣]){re.escape(star)}{particles}(?![가-힣])", text
+        ))
 
     # 明确排除的低热度关键词（出现这些的文章降分）
     LOW_HEAT_KEYWORDS = [
@@ -133,9 +285,45 @@ class ScoringSystem:
         "pre-debut", "사전데뷔",
     ]
 
+    KOREAN_MEDIA_DOMAINS = {
+        "entertain.naver.com", "osen.co.kr", "newsen.com",
+        "starnewskorea.com", "xportsnews.com", "mydaily.co.kr",
+        "dispatch.co.kr", "tenasia.hankyung.com", "sports.chosun.com",
+        "tvreport.co.kr", "mk.co.kr", "heraldpop.com", "imbc.com",
+    }
+    CONCRETE_EVENT_KEYWORDS = [
+        "comeback", "mv", "music video", "teaser", "concept photo",
+        "single", "album", "mini album", "stage", "music show",
+        "concert", "tour", "airport", "fashion week", "brand event",
+        "livestream", "live broadcast", "instagram", "social media",
+        "fans react", "netizens", "controversy", "agency response",
+        "legal action", "컴백", "뮤직비디오", "티저", "콘서트",
+        "공항", "패션위크", "브랜드", "라이브", "입장",
+    ]
+    MEDIUM_EVENT_KEYWORDS = [
+        "quiz show", "variety reference", "mentioned on", "overseas media",
+        "해외 방송", "퀴즈쇼", "예능 언급",
+    ]
+    ESPORTS_GAME_KEYWORDS = [
+        "pubg", "pnc", "e스포츠", "이스포츠", "배그", "국가대항전",
+        "크래프톤", "덕지순례", "게임", "선수", "경기", "대회",
+    ]
+    APPROVED_GROUP_ENTITIES = {
+        "KISS_OF_LIFE", "NMIXX", "ZEROBASEONE", "BOYNEXTDOOR", "NCT",
+        "ATEEZ", "THE_BOYZ", "TREASURE", "82MAJOR", "CRAVITY",
+        "P1HARMONY", "TWS", "ILLIT", "KATSEYE", "MEOVV", "CORTIS",
+        "ALLDAY_PROJECT",
+    }
+    MACRO_ANALYSIS_KEYWORDS = [
+        "generation shift", "k-pop generation", "big 4", "big four",
+        "successor list", "industry analysis", "industry trend",
+        "market outlook", "世代交替", "四大公司", "接班人",
+        "行业分析", "行业趋势", "格局分析", "名单盘点",
+    ]
+
     def __init__(self, config: Dict):
         self.config = config
-        self.scoring_cfg = config.get("topic_agent.scoring", {})
+        self.scoring_cfg = config.get("topic_agent", {}).get("scoring", {})
         self.weights = self.scoring_cfg.get("weights", {})
         self.consistency_threshold = 40  # 硬编码低阈值测试（配置读取有问题）
         self.duplicate_days = self.scoring_cfg.get("duplicate_check_days", 7)
@@ -194,6 +382,14 @@ class ScoringSystem:
             topic_heat, freshness, image_quality, image_relevance,
             article_quality, predicted_read, risk, anti_ai
         )
+        source_priority, editorial_adjustment, editorial_notes = (
+            self._score_editorial_priority(article, tavily_images)
+        )
+        total_score = max(0, min(10, total_score + editorial_adjustment))
+        # 同题不同来源不是硬重复：允许作为补充候选，但轻度降权，
+        # 避免连续发布同质内容。完全相同 URL 仍由 ready 检查硬过滤。
+        if duplicate_result.get("related_event"):
+            total_score = max(0, total_score - 0.5)
 
         # 选中理由
         selected_reason = self._generate_reason(
@@ -215,6 +411,8 @@ class ScoringSystem:
             "image_quality_notes": image_quality_notes,
             "duplicate_check_result": duplicate_result,
             "source_urls": source_urls,
+            "source_priority_score": source_priority,
+            "editorial_priority_notes": editorial_notes,
         }
 
         logger.info(
@@ -226,6 +424,76 @@ class ScoringSystem:
         )
 
         return result
+
+    def _score_editorial_priority(
+        self, article: Dict, images: List[Dict]
+    ) -> Tuple[float, float, str]:
+        """优先韩媒、具体艺人事件和可直接使用的图片，降权宏观分析。"""
+        url = (article.get("url") or "").lower()
+        title_summary = " ".join([
+            article.get("title") or "",
+            article.get("content") or "",
+        ]).lower()
+        is_korean_media = any(domain in url for domain in self.KOREAN_MEDIA_DOMAINS)
+        has_event = any(
+            keyword in title_summary for keyword in self.CONCRETE_EVENT_KEYWORDS
+        )
+        macro_hit = next(
+            (keyword for keyword in self.MACRO_ANALYSIS_KEYWORDS
+             if keyword in title_summary),
+            None,
+        )
+        esports_hit = next(
+            (keyword for keyword in self.ESPORTS_GAME_KEYWORDS
+             if keyword in title_summary),
+            None,
+        )
+        medium_event = any(
+            keyword in title_summary for keyword in self.MEDIUM_EVENT_KEYWORDS
+        )
+        has_source_metadata = bool(
+            article.get("original_title")
+            and article.get("source_url")
+            and article.get("published_at")
+        )
+
+        adjustment = 0.0
+        notes = []
+        if is_korean_media:
+            adjustment += 1.2
+            notes.append("韩国本土媒体")
+        if len(images) >= 2:
+            adjustment += 0.6
+            notes.append(f"原文图片{len(images)}张")
+        else:
+            adjustment -= 1.0
+            notes.append("原文图片不足")
+        if has_event:
+            adjustment += 0.8
+            notes.append("具体艺人事件")
+        else:
+            adjustment -= 1.0
+            notes.append("缺少具体事件")
+        if medium_event and not has_event:
+            adjustment += 0.2
+            notes.append("海外节目/媒体提及")
+        if has_source_metadata:
+            adjustment += 0.4
+            notes.append("来源元数据完整")
+        if macro_hit:
+            adjustment -= 3.0
+            notes.append(f"宏观分析:{macro_hit}")
+        if esports_hit:
+            adjustment -= 6.0
+            notes.append(f"电竞/游戏:{esports_hit}")
+
+        priority = (
+            (4 if is_korean_media else 0)
+            + (3 if has_event else 0)
+            + (2 if len(images) >= 2 else 0)
+            + (1 if has_source_metadata else 0)
+        )
+        return priority, adjustment, "；".join(notes)
 
     def _score_topic_heat(self, article: Dict) -> float:
         """话题热度评分 (0-10) — 优先韩国顶流明星"""
@@ -248,6 +516,16 @@ class ScoringSystem:
                 score += 0.8  # 内容中出现 = 可能只是提及
 
         total_hits = title_hits + content_hits
+        approved_hits = (
+            self.detect_artist_entities(title) & self.APPROVED_GROUP_ENTITIES
+        )
+        if approved_hits and title_hits == 0:
+            title_hits += 1
+            total_hits += 1
+            score += 2.5
+            logger.info(
+                f"[评分] 备用K-pop组合命中: {sorted(approved_hits)}"
+            )
         if total_hits > 0:
             logger.info(
                 f"[评分] 🔥 顶流明星命中: 标题{title_hits} 内容{content_hits} | "
@@ -543,6 +821,7 @@ class ScoringSystem:
         data_dir = Path(self.config.get("project_root", ".")) / "data" / "topics"
         is_duplicate = False
         duplicate_source = ""
+        related_event = False
 
         if data_dir.exists():
             cutoff = datetime.now() - timedelta(days=self.duplicate_days)
@@ -560,14 +839,13 @@ class ScoringSystem:
                             past_title = topic.get("title", "").strip().lower()[:50]
                             past_url = topic.get("url", "")
 
-                            if title and past_title == title:
-                                is_duplicate = True
-                                duplicate_source = past_url or past_title
-                                break
                             if url and past_url == url:
                                 is_duplicate = True
                                 duplicate_source = past_url
                                 break
+                            if title and past_title == title:
+                                related_event = True
+                                duplicate_source = past_url or past_title
                         if is_duplicate:
                             break
                     if is_duplicate:
@@ -578,8 +856,13 @@ class ScoringSystem:
         return {
             "is_duplicate": is_duplicate,
             "duplicate_source": duplicate_source,
+            "related_event": related_event and not is_duplicate,
             "checked_days": self.duplicate_days,
-            "status": "duplicate" if is_duplicate else "unique",
+            "status": (
+                "duplicate" if is_duplicate
+                else "related_event" if related_event
+                else "unique"
+            ),
         }
 
     def _extract_source_urls(self, article: Dict, images: List[Dict]) -> List[str]:

@@ -17,7 +17,8 @@ from src.logger import logger
 BLOCKED_KEYWORDS = [
     "audition", "apply", "recruit", "trainee", "casting",
     "banner", "logo", "advertisement", "sponsor", "sponsored", "promo", "promotion", "widget", "icon", "avatar", "profile", "subscribe", "newsletter", "related", "recommend", "outbrain", "taboola", "doubleclick", "googlesyndication", "tracking", "affiliate", "campaign", "popup", "ads", "adserver", "googleads",
-    "button", "icon", "favicon",
+    "button", "icon", "favicon", "xwhite30.png", "placeholder",
+    "sprite", "blank",
 ]
 
 
@@ -30,6 +31,18 @@ def _is_blocked_image(url: str, description: str = "") -> bool:
         if kw in text:
             return True
     return False
+
+
+def _is_broken_starnews_image_url(url: str) -> bool:
+    """Skip StarNews article-path image URLs that are known 404 candidates."""
+    url_l = (url or "").lower()
+    if "starnewskorea.com" not in url_l:
+        return False
+    if "image.starnewskorea.com/cdn-cgi/image/" in url_l:
+        return False
+    parsed = urlparse(url_l)
+    path = parsed.path or ""
+    return "/music/" in path and "/w=1200/" in path
 
 
 def _is_logo_or_symbol(img_path: str) -> bool:
@@ -123,6 +136,78 @@ def _is_logo_or_symbol(img_path: str) -> bool:
         return False
 
 
+def _assess_image_quality(
+    img_path: str, thresholds: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """基于尺寸、文件大小、清晰度和信息量判断新闻图片视觉可用性。"""
+    try:
+        from PIL import Image as PILImage
+        import numpy as np
+
+        path = Path(img_path)
+        image = PILImage.open(path).convert("RGB")
+        width, height = image.size
+        file_size = path.stat().st_size
+        gray = np.asarray(image.convert("L").resize((min(width, 800), min(height, 800))))
+        gray = gray.astype(np.float32)
+
+        # 离散 Laplacian 方差：越低通常越模糊/虚化。
+        laplacian = (
+            -4 * gray
+            + np.roll(gray, 1, axis=0)
+            + np.roll(gray, -1, axis=0)
+            + np.roll(gray, 1, axis=1)
+            + np.roll(gray, -1, axis=1)
+        )
+        blur_score = float(np.var(laplacian[1:-1, 1:-1]))
+
+        histogram = np.bincount(gray.astype(np.uint8).ravel(), minlength=256)
+        probabilities = histogram[histogram > 0] / histogram.sum()
+        entropy = float(-(probabilities * np.log2(probabilities)).sum())
+        contrast = float(np.std(gray))
+
+        thresholds = thresholds or {}
+        min_width = thresholds.get("min_width", 480)
+        min_height = thresholds.get("min_height", 320)
+        min_file_size = thresholds.get("min_file_size_kb", 25) * 1024
+        min_blur_score = thresholds.get("min_blur_score", 45)
+
+        reasons = []
+        if width < min_width or height < min_height:
+            reasons.append(f"尺寸过小({width}x{height})")
+        if file_size < min_file_size:
+            reasons.append(f"文件过小({file_size // 1024}KB)")
+        if blur_score < min_blur_score:
+            reasons.append(f"清晰度不足(blur={blur_score:.1f})")
+        if entropy < 3.2 or contrast < 18:
+            reasons.append(
+                f"信息量过低(entropy={entropy:.1f},contrast={contrast:.1f})"
+            )
+
+        score = 100
+        score -= 35 if blur_score < min_blur_score else 0
+        score -= 25 if width < min_width or height < min_height else 0
+        score -= 20 if file_size < min_file_size else 0
+        score -= 25 if entropy < 3.2 or contrast < 18 else 0
+        return {
+            "passed": not reasons,
+            "quality_score": max(0, score),
+            "blur_score": round(blur_score, 1),
+            "entropy": round(entropy, 2),
+            "contrast": round(contrast, 1),
+            "width": width,
+            "height": height,
+            "file_size": file_size,
+            "reason": "；".join(reasons),
+        }
+    except Exception as exc:
+        return {
+            "passed": False,
+            "quality_score": 0,
+            "reason": f"质量检测异常: {exc}",
+        }
+
+
 class ImageAgent(BaseAgent):
     """
     配图 Agent 职责：
@@ -158,7 +243,21 @@ class ImageAgent(BaseAgent):
     async def execute(self, context: Dict) -> AgentResult:
         """执行配图流程"""
         # 从 context 中获取 Tavily 源文章配图
-        tavily_images = context.get("tavily_images", [])
+        tavily_images = list(context.get("tavily_images", []))
+        topic_info = context.get("topic_info", {})
+        article_url = topic_info.get("url", "") if isinstance(topic_info, dict) else ""
+        if article_url:
+            og_image = await self._fetch_og_image(article_url)
+            if og_image and not any(
+                (img.get("url") if isinstance(img, dict) else img) == og_image
+                for img in tavily_images
+            ):
+                tavily_images.insert(0, {
+                    "url": og_image,
+                    "source": article_url,
+                    "description": "article og:image",
+                })
+                logger.info(f"[配图Agent] 优先加入文章 og:image: {og_image[:80]}")
 
         if not tavily_images:
             logger.warning("[配图Agent] 写作Agent未传递 tavily_images，无图可用")
@@ -179,6 +278,9 @@ class ImageAgent(BaseAgent):
             desc = img_info.get("description", "") if isinstance(img_info, dict) else ""
             if not url:
                 continue
+            if _is_broken_starnews_image_url(url):
+                logger.info(f"[配图Agent] 跳过StarNews无效拼接图片URL: {url[:100]}")
+                continue
             if _is_blocked_image(url, desc):
                 logger.info(f"[配图Agent] 跳过LOGO/广告图片: {url[:80]}")
                 continue
@@ -189,11 +291,13 @@ class ImageAgent(BaseAgent):
         )
 
         if not filtered_images:
-            return AgentResult(
-                status=AgentStatus.FAILED,
-                agent_name=self.name,
-                error="所有图片被关键词过滤，图片不合格，终止本篇文章",
-            )
+            filtered_images = await self._tavily_image_fallback(context)
+            if not filtered_images:
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    agent_name=self.name,
+                    error="所有图片被过滤且图片搜索预算不足或无结果",
+                )
 
         # Step 2: 限制每篇文章最多3张图片
         max_images = 4
@@ -223,14 +327,31 @@ class ImageAgent(BaseAgent):
                 logger.info(f"[配图Agent] ✅ 下载: {result['filename']} ← {result['source_url'][:80]}")
 
         if not downloaded:
-            return AgentResult(
-                status=AgentStatus.FAILED,
-                agent_name=self.name,
-                error="所有图片下载失败，终止本篇文章",
-            )
+            fallback_images = await self._tavily_image_fallback(context)
+            if fallback_images:
+                fallback_results = await asyncio.gather(*[
+                    self._download_image(
+                        img.get("url", ""),
+                        img,
+                        len(filtered_images) + idx,
+                    )
+                    for idx, img in enumerate(fallback_images)
+                    if img.get("url")
+                ], return_exceptions=True)
+                downloaded = [
+                    result for result in fallback_results
+                    if isinstance(result, dict) and result.get("path")
+                ]
+            if not downloaded:
+                return AgentResult(
+                    status=AgentStatus.FAILED,
+                    agent_name=self.name,
+                    error="文章图片、og:image、Tavily备用图片均失败",
+                )
 
         # Step 4: LOGO/符号图片内容检测（基于颜色复杂度、边缘密度等）
         valid_downloaded = []
+        quality_rejected = []
         for img in downloaded:
             if _is_logo_or_symbol(img["path"]):
                 logger.info(f"[配图Agent] 🚫 跳过LOGO/符号图片: {img['filename']}")
@@ -239,20 +360,89 @@ class ImageAgent(BaseAgent):
                     Path(img["path"]).unlink(missing_ok=True)
                 except Exception:
                     pass
-            else:
-                valid_downloaded.append(img)
+                quality_rejected.append({**img, "quality_reason": "疑似LOGO/符号"})
+                continue
+
+            quality = _assess_image_quality(
+                img["path"],
+                self.get_config("topic_agent.image", {}),
+            )
+            relevance = self._assess_image_relevance(topic_info, img)
+            img.update({
+                "quality_passed": quality["passed"],
+                "quality_score": quality.get("quality_score", 0),
+                "blur_score": quality.get("blur_score", 0),
+                "quality_reason": quality.get("reason", ""),
+                "relevance_passed": relevance["passed"],
+                "relevance_reason": relevance.get("reason", ""),
+            })
+            if not quality["passed"] or not relevance["passed"]:
+                quality_rejected.append(img)
+                logger.info(
+                    f"[配图Agent] 🚫 视觉质量不合格: {img['filename']} | "
+                    f"{quality['reason'] or relevance.get('reason', '')}"
+                )
+                try:
+                    Path(img["path"]).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                continue
+            valid_downloaded.append(img)
 
         logger.info(
             f"[配图Agent] 内容检测: {len(downloaded)} → {len(valid_downloaded)} 张 "
-            f"(排除 {len(downloaded) - len(valid_downloaded)} 张LOGO/符号)"
+            f"(排除 {len(downloaded) - len(valid_downloaded)} 张低质/无效图)"
         )
 
         if not valid_downloaded:
             return AgentResult(
-                status=AgentStatus.PARTIAL,
+                status=AgentStatus.FAILED,
                 agent_name=self.name,
-                output={"images": [], "message": "所有图片被LOGO/符号检测过滤"},
+                error="所有下载图片均未通过视觉质量检查",
             )
+
+        if len(quality_rejected) > len(downloaded) / 2:
+            logger.warning(
+                f"[配图Agent] ⚠️ 多张图片不可用({len(quality_rejected)}/{len(downloaded)})，"
+                "但保留已通过图片继续"
+            )
+
+        quality_warning = None
+        cover_only_mode = (
+            len(valid_downloaded) == 1
+            and bool(self.get_config("topic_agent.image.allow_cover_only_mode", True))
+        )
+        if cover_only_mode:
+            quality_warning = "仅1张有效图片，进入封面图模式"
+            logger.warning("[配图Agent] ⚠️ 仅1张有效图片，进入封面图模式")
+            logger.info("[配图Agent] 正文图为空，继续排版")
+
+        before_dedupe = len(valid_downloaded)
+        valid_downloaded = self._dedupe_images(valid_downloaded)
+        if len(valid_downloaded) != before_dedupe:
+            logger.info(
+                f"[配图Agent] 图片去重: {before_dedupe} → {len(valid_downloaded)}"
+            )
+        cover_only_mode = (
+            len(valid_downloaded) == 1
+            and bool(self.get_config("topic_agent.image.allow_cover_only_mode", True))
+        )
+        if cover_only_mode:
+            quality_warning = "仅1张有效图片，进入封面图模式"
+
+        # 质量最高且最清晰的图片优先作为封面。
+        if self.get_config("topic_agent.image.cover_face_priority", True):
+            for img in valid_downloaded:
+                img["cover_face_score"] = self._cover_face_score(img.get("path", ""))
+        valid_downloaded.sort(
+            key=lambda item: (
+                item.get("cover_face_score", 0),
+                item.get("quality_score", 0),
+                item.get("blur_score", 0),
+                item.get("file_size", 0),
+            ),
+            reverse=True,
+        )
 
         # Step 5: 分类（第一张作为封面，其余作为文中插图）
         categorized = self._categorize_images(valid_downloaded)
@@ -260,12 +450,17 @@ class ImageAgent(BaseAgent):
         # Step 5: 为封面图生成智能裁剪版本（确保人物头部完整）
         if categorized["cover"]:
             cover = categorized["cover"][0]
-            smart_path = self._create_smart_cover(cover["path"])
-            if smart_path:
-                cover["original_path"] = cover["path"]
-                cover["path"] = smart_path
-                cover["filename"] = Path(smart_path).name
-                logger.info(f"[配图Agent] ✅ 封面图智能裁剪: {cover['filename']}")
+            if cover_only_mode and not self.get_config(
+                "topic_agent.image.use_collage_cover", False
+            ):
+                logger.info("[配图Agent] cover_only_mode=True，单图直接作为封面，不生成拼图/复合封面")
+            else:
+                smart_path = self._create_smart_cover(cover["path"])
+                if smart_path:
+                    cover["original_path"] = cover["path"]
+                    cover["path"] = smart_path
+                    cover["filename"] = Path(smart_path).name
+                    logger.info(f"[配图Agent] ✅ 封面图智能裁剪: {cover['filename']}")
 
         logger.info(
             f"[配图Agent] ✅ 下载完成: 共 {len(valid_downloaded)} 张 | "
@@ -284,9 +479,94 @@ class ImageAgent(BaseAgent):
                 "inline_images": categorized["inline"],
                 "footer_images": categorized["footer"],
                 "total_count": len(all_images),
+                "cover_only_mode": cover_only_mode,
                 "image_dir": str(self.image_dir),
+                "quality_warning": quality_warning,
+                "rejected_image_count": len(quality_rejected),
             },
         )
+
+    @classmethod
+    def _image_identity(cls, image: Dict) -> str:
+        for key in ("url", "source_url", "path", "original_path"):
+            value = image.get(key)
+            if value:
+                return f"{key}:{str(value).strip().lower().replace(chr(92), '/')}"
+        return ""
+
+    @staticmethod
+    def _average_image_hash(path: str) -> str:
+        if not path or not Path(path).exists():
+            return ""
+        try:
+            from PIL import Image as PILImage
+            img = PILImage.open(path).convert("L").resize((8, 8))
+            pixels = list(img.getdata())
+            avg = sum(pixels) / len(pixels)
+            bits = "".join("1" if p >= avg else "0" for p in pixels)
+            return f"{int(bits, 2):016x}"
+        except Exception:
+            return ""
+
+    @classmethod
+    def _dedupe_images(cls, images: List[Dict]) -> List[Dict]:
+        seen_ids = set()
+        seen_hashes = set()
+        deduped = []
+        for image in images:
+            identity = cls._image_identity(image)
+            img_hash = cls._average_image_hash(image.get("path", ""))
+            if identity and identity in seen_ids:
+                logger.info(f"[配图Agent] 跳过重复图片: {identity[:80]}")
+                continue
+            if img_hash and img_hash in seen_hashes:
+                logger.info(f"[配图Agent] 跳过相同hash图片: {img_hash}")
+                continue
+            if identity:
+                seen_ids.add(identity)
+            if img_hash:
+                image["image_hash"] = img_hash
+                seen_hashes.add(img_hash)
+            deduped.append(image)
+        return deduped
+
+    @staticmethod
+    def _assess_image_relevance(topic_info: Dict, image: Dict) -> Dict[str, Any]:
+        """有明确人物元数据时，拒绝与文章艺人明显不一致的图片。"""
+        try:
+            from src.topic.scoring import ScoringSystem
+
+            article_text = " ".join([
+                str(topic_info.get("title", "")),
+                str(topic_info.get("summary", "")),
+                str(topic_info.get("url", "")),
+            ])
+            image_text = " ".join([
+                str(image.get("description", "")),
+                str(image.get("article_title", "")),
+                str(image.get("article_source", "")),
+                str(image.get("source_url", "")),
+            ])
+            article_hits = {
+                star for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, article_text)
+            }
+            image_hits = {
+                star for star in ScoringSystem.TOP_STARS
+                if ScoringSystem._match_star(star, image_text)
+            }
+            if article_hits and image_hits and not article_hits.intersection(image_hits):
+                return {
+                    "passed": False,
+                    "reason": (
+                        f"图片人物与文章不一致: "
+                        f"{sorted(article_hits)[:2]} vs {sorted(image_hits)[:2]}"
+                    ),
+                }
+            return {"passed": True, "reason": ""}
+        except Exception as exc:
+            logger.warning(f"[配图Agent] 图片相关性检测异常，保守继续: {exc}")
+            return {"passed": True, "reason": ""}
 
     async def _download_image(self, url: str, img_info: Dict, idx: int) -> Optional[Dict]:
         """下载单张图片到本地（统一转换为标准JPEG，确保微信兼容）"""
@@ -298,7 +578,7 @@ class ImageAgent(BaseAgent):
             return None
 
         try:
-            response = await http.get(url)
+            response = await http.get(url, headers=self._headers_for_url(url))
             response.raise_for_status()
 
             # 跳过 SVG（通过 content-type 二次检查）
@@ -374,7 +654,127 @@ class ImageAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"[配图Agent] 下载失败 {url[:80]}: {e}")
-            raise
+            return None
+
+    @staticmethod
+    def _headers_for_url(url: str) -> Dict[str, str]:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            )
+        }
+        host = urlparse(url).netloc.lower()
+        if "allkpop.com" in host:
+            headers["Referer"] = "https://www.allkpop.com/"
+        elif "koreaboo.com" in host:
+            headers["Referer"] = "https://www.koreaboo.com/"
+        elif "soompi.com" in host or "soompi.io" in host:
+            headers["Referer"] = "https://www.soompi.com/"
+        return headers
+
+    async def _fetch_og_image(self, article_url: str) -> Optional[str]:
+        """读取文章 og:image，失败时静默回退到 Tavily 图片。"""
+        try:
+            http = await self._get_http()
+            response = await http.get(
+                article_url,
+                headers=self._headers_for_url(article_url),
+            )
+            response.raise_for_status()
+            html = response.text[:500_000]
+            patterns = [
+                r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)',
+                r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::secure_url)?["\']',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, html, flags=re.IGNORECASE)
+                if match and not _is_blocked_image(match.group(1)):
+                    return match.group(1)
+        except Exception as exc:
+            logger.info(f"[配图Agent] og:image 获取失败，使用 Tavily 图片: {exc}")
+        return None
+
+    async def _tavily_image_fallback(self, context: Dict) -> List[Dict]:
+        """仅在已有图片失败后执行，且与选题搜索共享 credits 账本。"""
+        budget = context.get("tavily_budget")
+        if not isinstance(budget, dict):
+            logger.warning("[配图Agent] 缺少共享 Tavily 预算，跳过备用搜图")
+            return []
+        max_image_calls = min(
+            budget.get("max_image_calls", 2),
+            self.get_config("topic_agent.image.max_image_search_queries", 2),
+        )
+        if budget.get("image_calls", 0) >= max_image_calls:
+            logger.warning("[配图Agent] Tavily 图片搜索次数预算已耗尽")
+            return []
+
+        cost = 1  # 图片 fallback 强制 basic
+        projected = budget.get("credits", 0) + cost
+        absolute_max = budget.get("absolute_max_credits", 50)
+        hard_stop = budget.get("hard_stop_credits", 20)
+        default_max = budget.get("max_total_credits", 12)
+        if projected > absolute_max:
+            budget["hard_stop_triggered"] = True
+            logger.error("[配图Agent] Tavily absolute max 触发，强制停止备用搜图")
+            return []
+        if projected > hard_stop:
+            budget["hard_stop_triggered"] = True
+            logger.error("[配图Agent] Tavily hard stop 触发，停止备用搜图")
+            return []
+        if projected > default_max:
+            logger.warning("[配图Agent] Tavily 默认credits预算不足，切换下一篇")
+            return []
+
+        topic = context.get("topic_info", {})
+        title = topic.get("title", "") if isinstance(topic, dict) else ""
+        if not title:
+            return []
+        budget["credits"] = projected
+        budget["calls"] = budget.get("calls", 0) + 1
+        budget["image_calls"] = budget.get("image_calls", 0) + 1
+
+        try:
+            http = await self._get_http()
+            response = await http.post(
+                f"{self.get_config('tavily.base_url', 'https://api.tavily.com')}/search",
+                json={
+                    "query": f"{title} official press photo",
+                    "search_depth": "basic",
+                    "auto_parameters": False,
+                    "include_answer": False,
+                    "include_raw_content": False,
+                    "include_images": True,
+                    "max_results": 1,
+                    "topic": "news",
+                },
+                headers={
+                    "Authorization": f"Bearer {self.get_config('tavily.api_key', '')}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            images = list(data.get("images", []))
+            for result in data.get("results", []):
+                images.extend(result.get("images", []))
+            normalized = []
+            for image in images:
+                item = image if isinstance(image, dict) else {"url": image}
+                if item.get("url") and not _is_blocked_image(
+                    item["url"], item.get("description", "")
+                ):
+                    normalized.append(item)
+            logger.info(
+                f"[配图Agent] Tavily备用搜图调用 "
+                f"{budget['image_calls']}/{max_image_calls} | "
+                f"累计credits={budget['credits']} | 结果={len(normalized)}"
+            )
+            return normalized[:3]
+        except Exception as exc:
+            logger.warning(f"[配图Agent] Tavily备用搜图失败: {exc}")
+            return []
 
     def _categorize_images(self, downloaded: List[Dict]) -> Dict[str, List[Dict]]:
         """
@@ -388,6 +788,7 @@ class ImageAgent(BaseAgent):
 
         if len(downloaded) == 1:
             # 只有一张图，用作封面
+            downloaded[0]["position"] = "cover"
             return {"cover": [downloaded[0]], "inline": [], "footer": []}
 
         if len(downloaded) == 2:
@@ -414,6 +815,79 @@ class ImageAgent(BaseAgent):
             img["position"] = "footer"
 
         return {"cover": cover, "inline": inline, "footer": footer}
+
+    @staticmethod
+    def _cover_face_score(image_path: str) -> int:
+        """Return a simple cover priority score for images with visible faces."""
+        if not image_path:
+            return 0
+        try:
+            import cv2
+            from PIL import Image as PILImage
+            import numpy as np
+
+            img = PILImage.open(image_path)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            arr = np.array(img)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            cascade_path = (
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            face_cascade = cv2.CascadeClassifier(cascade_path)
+            faces = face_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30)
+            )
+            if len(faces) == 0:
+                return 0
+            height, width = gray.shape[:2]
+            largest = max(faces, key=lambda r: r[2] * r[3])
+            _, fy, fw, fh = largest
+            face_area_ratio = (fw * fh) / max(width * height, 1)
+            upper_bonus = 20 if fy < height * 0.55 else 0
+            return int(60 + min(face_area_ratio * 500, 30) + upper_bonus)
+        except Exception:
+            return 0
+
+    def _create_safe_cover_canvas(self, img, target_ratio: float):
+        """Create a cover canvas that preserves the full subject instead of a body-only crop."""
+        try:
+            from PIL import ImageFilter
+
+            width, height = img.size
+            canvas_w = width
+            canvas_h = max(1, int(canvas_w / target_ratio))
+            if canvas_h > height:
+                canvas_h = height
+                canvas_w = max(1, int(canvas_h * target_ratio))
+
+            bg = img.copy()
+            bg_ratio = bg.size[0] / bg.size[1]
+            if bg_ratio < target_ratio:
+                bg_w = canvas_w
+                bg_h = int(bg_w / bg_ratio)
+            else:
+                bg_h = canvas_h
+                bg_w = int(bg_h * bg_ratio)
+            bg = bg.resize((bg_w, bg_h))
+            left = max(0, (bg_w - canvas_w) // 2)
+            top = max(0, int((bg_h - canvas_h) * 0.30))
+            bg = bg.crop((left, top, left + canvas_w, top + canvas_h))
+            bg = bg.filter(ImageFilter.GaussianBlur(radius=18))
+
+            fg = img.copy()
+            fg_h = canvas_h
+            fg_w = max(1, int(fg_h * width / height))
+            if fg_w > canvas_w:
+                fg_w = canvas_w
+                fg_h = max(1, int(fg_w * height / width))
+            fg = fg.resize((fg_w, fg_h))
+            x = (canvas_w - fg_w) // 2
+            y = max(0, (canvas_h - fg_h) // 2)
+            bg.paste(fg, (x, y))
+            return bg
+        except Exception:
+            return None
 
     def _create_smart_cover(self, image_path: str) -> Optional[str]:
         """
@@ -469,14 +943,26 @@ class ImageAgent(BaseAgent):
                     faces = sorted(faces, key=lambda r: r[2] * r[3], reverse=True)
                     fx, fy, fw, fh = faces[0]
                     face_center_y = fy + fh // 2
-                    # 确保脸部在裁剪区域内，且上方有空间
-                    start_y = face_center_y - new_height // 2
-                    # 确保头部上方有足够空间（至少 15% 的新高度）
-                    min_start = max(0, fy - int(new_height * 0.15))
-                    start_y = max(min_start, start_y)
+                    if (
+                        self.get_config("topic_agent.image.avoid_body_only_cover", True)
+                        and new_height < fh * 2.2
+                    ):
+                        cropped = self._create_safe_cover_canvas(img, target_ratio)
+                        if cropped is None:
+                            return None
+                        start_y = 0
+                    else:
+                        # Put face in the upper third and keep headroom.
+                        start_y = face_center_y - int(new_height * 0.35)
+                        max_start_for_headroom = max(0, fy - int(new_height * 0.18))
+                        start_y = min(start_y, max_start_for_headroom)
+                        # Ensure face bottom remains inside the crop.
+                        start_y = min(start_y, fy + fh - int(new_height * 0.68))
+                        # 确保不超出底部
+                        start_y = min(start_y, height - new_height)
+                        start_y = max(0, start_y)
+                        cropped = img.crop((0, start_y, width, start_y + new_height))
                     # 确保不超出底部
-                    start_y = min(start_y, height - new_height)
-                    start_y = max(0, start_y)
                     logger.info(
                         f"[配图Agent] 人脸检测成功: ({fx},{fy},{fw},{fh}), "
                         f"裁剪起始Y={start_y}, 高度={new_height}"
@@ -484,16 +970,20 @@ class ImageAgent(BaseAgent):
                 else:
                     # 无人脸：对竖版图取上方区域（头部通常在上1/3）
                     # 取从 5% 到 5%+new_height 的区域
-                    start_y = int(height * 0.05)
-                    if start_y + new_height > height:
-                        start_y = height - new_height
-                    start_y = max(0, start_y)
+                    if self.get_config("topic_agent.image.avoid_body_only_cover", True):
+                        cropped = self._create_safe_cover_canvas(img, target_ratio)
+                        if cropped is None:
+                            return None
+                        start_y = 0
+                    else:
+                        start_y = int(height * 0.05)
+                        if start_y + new_height > height:
+                            start_y = height - new_height
+                        start_y = max(0, start_y)
+                        cropped = img.crop((0, start_y, width, start_y + new_height))
                     logger.info(
                         f"[配图Agent] 未检测到人脸, 竖版图取上方区域: start_y={start_y}, h={new_height}"
                     )
-
-                # 裁剪
-                cropped = img.crop((0, start_y, width, start_y + new_height))
 
             else:
                 # 横版图片：从宽度方向居中裁剪

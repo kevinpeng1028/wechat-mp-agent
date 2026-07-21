@@ -140,48 +140,57 @@ class WeChatMPOrchestrator:
             if manual_mode:
                 await self._confirm_step("写作（爱豆状态观察文风）")
 
-            writer_result = await self.writer.run(ctx)
-            report["steps"].append(self._result_to_dict(writer_result))
-
-            if not writer_result.is_success:
-                console.print(f"[red]❌ 写作失败: {self._short_error(writer_result.error)}[/red]")
-                report["final_status"] = "failed_at_writer"
-                return self._finalize_report(report)
-
-            ctx.update(writer_result.output or {})
-            progress.update(task2, completed=True)
-
-            written = writer_result.output.get("written_articles", []) if writer_result.output else []
-            console.print(
-                f"  ✅ 写作完成: {len(written)} 篇文章 | "
-                f"字数: {written[0].get('word_count', '?') if written else '?'} | "
-                f"图文一致性: {written[0].get('consistency_score', '?') if written else '?'}分"
-            )
-
             # ---- Step 3: 配图（下载Tavily源文章配图）----
             task3 = progress.add_task("[bold magenta]③ 配图 Agent[/bold magenta]", total=None)
 
             if manual_mode:
                 await self._confirm_step("配图（下载Tavily源文章配图）")
 
-            # 配图Agent需要 tavily_images
-            # 从写作结果中获取
-            all_images = writer_result.output.get("tavily_images", []) if writer_result.output else []
-            ctx["tavily_images"] = all_images
+            fallback_topics = ctx.get("ready_articles") or selected
+            max_attempts = self.config.get(
+                "topic_agent.image.max_article_image_attempts", 5
+            )
+            written, images, fallback_results = await self._write_with_image_fallback(
+                ctx,
+                fallback_topics,
+                max_attempts=max_attempts,
+                target_count=self.config.get("topic_agent.search.selected_count", 2),
+            )
+            report["candidate_attempts"] = getattr(
+                self, "_last_candidate_attempts", []
+            )
+            for result in self._aggregate_fallback_results():
+                report["steps"].append(self._result_to_dict(result))
 
-            image_result = await self.image_agent.run(ctx)
-            report["steps"].append(self._result_to_dict(image_result))
+            if not written:
+                failures = getattr(self, "_last_fallback_failures", {})
+                attempted_count = min(len(fallback_topics), max_attempts)
+                status, error = self._fallback_failure_outcome(
+                    failures, attempted_count
+                )
+                report["final_status"] = status
+                report["error"] = error
+                logger.error(f"[编排器] {report['error']}")
+                return self._finalize_report(report)
 
-            # 配图失败必须阻塞：图片不过关不进入排版/草稿
-            if image_result.is_success:
-                images = image_result.output.get("images", []) if image_result.output else []
-                ctx["downloaded_images"] = images
-                progress.update(task3, completed=True)
-                console.print(f"  ✅ 配图完成: 下载 {len(images)} 张图片")
-            else:
-                logger.error(f"[编排器] 配图失败，终止流程，不进入排版/草稿: {image_result.error}")
-                raise RuntimeError(f"配图失败，终止流程，不进入排版/草稿: {image_result.error}")
-                progress.update(task3, completed=True)
+            ctx["written_articles"] = written
+            ctx["downloaded_images"] = images
+            ctx["selected_topics"] = [a.get("topic_info", {}) for a in written]
+            budget = ctx.get("tavily_budget", {})
+            if budget:
+                logger.info(
+                    f"[编排器] Tavily最终成本 | 实际调用={budget.get('calls', 0)} | "
+                    f"预计credits={budget.get('credits', 0)}/"
+                    f"{budget.get('max_total_credits', 12)} | "
+                    f"缓存命中={budget.get('cache_hits', 0)} | "
+                    f"剩余预算={max(0, budget.get('max_total_credits', 12)-budget.get('credits', 0))} | "
+                    f"hard stop={budget.get('hard_stop_triggered', False)}"
+                )
+            progress.update(task2, completed=True)
+            progress.update(task3, completed=True)
+            console.print(
+                f"  ✅ 写作/配图完成: {len(written)} 篇文章，下载 {len(images)} 张图片"
+            )
 
             # ---- Step 4: 排版 ----
             task4 = progress.add_task("[bold yellow]④ 排版 Agent[/bold yellow]", total=None)
@@ -198,7 +207,7 @@ class WeChatMPOrchestrator:
 
             if not format_result.is_success:
                 console.print(f"[red]❌ 排版失败: {self._short_error(format_result.error)}[/red]")
-                report["final_status"] = "failed_at_formatter"
+                report["final_status"] = "failed_at_formatting"
                 return self._finalize_report(report)
 
             ctx.update(format_result.output or {})
@@ -262,13 +271,14 @@ class WeChatMPOrchestrator:
         """准备排版Agent所需的数据格式"""
         # 获取已下载的图片（含本地 path），建立 url → path 映射
         downloaded = ctx.get("downloaded_images", [])
-        url_to_path = {}
+        url_to_download = {}
         for img in downloaded:
             if isinstance(img, dict):
-                url = img.get("url", "")
+                url = img.get("url") or img.get("source_url", "")
                 path = img.get("path", "")
                 if url and path:
-                    url_to_path[url] = path
+                    img["url"] = url
+                    url_to_download[url] = img
 
         formatted = []
         for article in written_articles:
@@ -279,8 +289,9 @@ class WeChatMPOrchestrator:
             for img in tavily_images:
                 if isinstance(img, dict) and not img.get("path"):
                     img_url = img.get("url", "")
-                    if img_url in url_to_path:
-                        img["path"] = url_to_path[img_url]
+                    if img_url in url_to_download:
+                        # 传递视觉质量指标，供排版前一致性检查再次验收。
+                        img.update(url_to_download[img_url])
             formatted.append({
                 "is_success": True,
                 "title": article.get("title", ""),
@@ -290,8 +301,237 @@ class WeChatMPOrchestrator:
                 "tavily_images": tavily_images,
                 "topic_info": article.get("topic_info", {}),
                 "position": article.get("position", "unknown"),
+                "cover_only_mode": article.get("cover_only_mode", False),
             })
         return formatted
+
+    async def _write_with_image_fallback(
+        self,
+        ctx: Dict,
+        candidates: List[Dict],
+        max_attempts: int = 5,
+        target_count: int = 2,
+    ):
+        """逐篇写作并验证图片；失败时切换下一候选。"""
+        successful_articles = []
+        successful_images = []
+        results = []
+        attempted = candidates[:max_attempts]
+        failure_counts = {"writing": 0, "image": 0, "formatting": 0}
+        candidate_attempts = []
+
+        for index, topic in enumerate(attempted, start=1):
+            title = topic.get("title", "?")
+            logger.info(
+                f"[编排器] 图片候选尝试 {index}/{len(attempted)}: {title[:80]}"
+            )
+            single_ctx = dict(ctx)
+            single_ctx["selected_topics"] = [topic]
+            writer_result = await self.writer.run(single_ctx)
+            results.append(writer_result)
+            if not writer_result.is_success:
+                failure_counts["writing"] += 1
+                topic["write_failed"] = True
+                topic["write_failure_reason"] = writer_result.error
+                candidate_attempts.append({
+                    "topic_title": title,
+                    "write_status": "failed",
+                    "image_status": "not_run",
+                    "failure_reason": writer_result.error or "写作失败",
+                })
+                logger.warning(f"[编排器] 写作失败，切换下一篇: {title[:80]}")
+                continue
+
+            article = (writer_result.output or {}).get("written_articles", [None])[0]
+            if not article:
+                failure_counts["writing"] += 1
+                topic["write_failed"] = True
+                topic["write_failure_reason"] = "写作结果缺少文章内容"
+                candidate_attempts.append({
+                    "topic_title": title,
+                    "write_status": "failed",
+                    "image_status": "not_run",
+                    "failure_reason": "写作结果缺少文章内容",
+                })
+                continue
+            image_ctx = dict(ctx)
+            image_ctx["tavily_images"] = article.get("tavily_images", [])
+            image_ctx["topic_info"] = article.get("topic_info", topic)
+            image_result = await self.image_agent.run(image_ctx)
+            results.append(image_result)
+            images = (image_result.output or {}).get("images", [])
+
+            if not image_result.is_success or not images:
+                failure_counts["image"] += 1
+                topic["image_failed"] = True
+                topic["image_failure_reason"] = (
+                    image_result.error
+                    or (image_result.output or {}).get("message")
+                    or "没有有效图片"
+                )
+                logger.warning(
+                    f"[编排器] 图片失败: {title[:80]} | "
+                    f"{topic['image_failure_reason']} | 切换下一篇"
+                )
+                candidate_attempts.append({
+                    "topic_title": title,
+                    "write_status": "success",
+                    "image_status": "failed",
+                    "failure_reason": topic["image_failure_reason"],
+                })
+                continue
+
+            position = "headline" if not successful_articles else "sub_headline"
+            article["position"] = position
+            article["topic_info"]["position"] = position
+            article["tavily_images"] = images
+            article["cover_only_mode"] = bool(
+                (image_result.output or {}).get("cover_only_mode")
+            )
+            successful_articles.append(article)
+            successful_images.extend(images)
+            candidate_attempts.append({
+                "topic_title": title,
+                "write_status": "success",
+                "image_status": "success",
+                "failure_reason": "",
+            })
+            logger.info(
+                f"[编排器] ✅ 图文通过: {title[:80]} | 图片 {len(images)} 张"
+            )
+            if len(successful_articles) >= target_count:
+                break
+
+        # 所有常规写作都失败时，用最高分候选做一次确定性的安全整理，
+        # 避免轻微校验问题让整条生产链停在 writing。
+        if not successful_articles and attempted and hasattr(
+            self.writer, "build_safe_fallback_article"
+        ):
+            topic = attempted[0]
+            fallback_article = self.writer.build_safe_fallback_article(topic)
+            if fallback_article.get("is_success"):
+                failure_counts["writing"] = max(
+                    0, failure_counts["writing"] - 1
+                )
+                logger.warning(
+                    f"[编排器] 常规写作均未产出，启用最高分候选 safe fallback: "
+                    f"{topic.get('title', '')[:80]}"
+                )
+                if hasattr(self.writer, "_save_draft"):
+                    await self.writer._save_draft(fallback_article)
+                image_ctx = dict(ctx)
+                image_ctx["tavily_images"] = fallback_article.get(
+                    "tavily_images", []
+                )
+                image_ctx["topic_info"] = topic
+                image_result = await self.image_agent.run(image_ctx)
+                results.append(AgentResult(
+                    status=AgentStatus.SUCCESS,
+                    agent_name="writer_agent",
+                    output={"written_articles": [fallback_article]},
+                ))
+                results.append(image_result)
+                images = (image_result.output or {}).get("images", [])
+                candidate_attempts.append({
+                    "topic_title": topic.get("title", ""),
+                    "write_status": "success",
+                    "image_status": (
+                        "success" if image_result.is_success and images
+                        else "failed"
+                    ),
+                    "failure_reason": (
+                        "" if image_result.is_success and images
+                        else image_result.error or "safe fallback 图片失败"
+                    ),
+                })
+                if image_result.is_success and images:
+                    fallback_article["position"] = "headline"
+                    fallback_article["topic_info"]["position"] = "headline"
+                    fallback_article["tavily_images"] = images
+                    fallback_article["cover_only_mode"] = bool(
+                        (image_result.output or {}).get("cover_only_mode")
+                    )
+                    successful_articles.append(fallback_article)
+                    successful_images.extend(images)
+                else:
+                    failure_counts["image"] += 1
+
+        self._last_fallback_failures = failure_counts
+        self._last_candidate_attempts = candidate_attempts
+        return successful_articles, successful_images, results
+
+    def _aggregate_fallback_results(self) -> List[AgentResult]:
+        attempts = getattr(self, "_last_candidate_attempts", [])
+        write_success = sum(
+            item.get("write_status") == "success" for item in attempts
+        )
+        write_failed = sum(
+            item.get("write_status") == "failed" for item in attempts
+        )
+        image_success = sum(
+            item.get("image_status") == "success" for item in attempts
+        )
+        image_failed = sum(
+            item.get("image_status") == "failed" for item in attempts
+        )
+        writing_status = (
+            AgentStatus.PARTIAL if write_success and write_failed
+            else AgentStatus.SUCCESS if write_success
+            else AgentStatus.FAILED
+        )
+        image_status = (
+            AgentStatus.PARTIAL if image_success and image_failed
+            else AgentStatus.SUCCESS if image_success
+            else AgentStatus.FAILED
+        )
+        results = [
+            AgentResult(
+                status=writing_status,
+                agent_name="writer_agent",
+                output={"success": write_success, "failed": write_failed},
+                error=(
+                    "部分候选写作失败，已切换下一篇"
+                    if writing_status == AgentStatus.PARTIAL
+                    else "所有候选写作均失败"
+                    if writing_status == AgentStatus.FAILED
+                    else None
+                ),
+            )
+        ]
+        if image_success or image_failed:
+            results.append(AgentResult(
+                status=image_status,
+                agent_name="image_agent",
+                output={"success": image_success, "failed": image_failed},
+                error=(
+                    "部分候选图片失败"
+                    if image_status == AgentStatus.PARTIAL
+                    else "所有已写文章图片均失败"
+                    if image_status == AgentStatus.FAILED
+                    else None
+                ),
+            ))
+        return results
+
+    @staticmethod
+    def _fallback_failure_outcome(
+        failures: Dict[str, int], attempted_count: int
+    ):
+        if failures.get("writing", 0) == attempted_count:
+            return (
+                "failed_at_writing",
+                f"前 {attempted_count} 篇候选写作均失败，终止流程",
+            )
+        if failures.get("image", 0) > 0:
+            return (
+                "failed_at_image",
+                f"前 {attempted_count} 篇候选图片均失败，"
+                "终止流程，不进入排版/草稿",
+            )
+        return (
+            "failed_at_writing",
+            f"前 {attempted_count} 篇候选未能完成写作，终止流程",
+        )
 
     # ==================== 辅助方法 ====================
 

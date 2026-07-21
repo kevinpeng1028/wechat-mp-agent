@@ -32,10 +32,33 @@ class ImageConsistencyChecker:
             "caption", "image_description", "usage_scene",
         ])
 
-        risk_filter = config.get("template_system.image_risk_filter", {})
+        risk_filter = (
+            config.get("template_system", {})
+            .get("image_risk_filter", {})
+        )
         self.excluded_patterns = risk_filter.get("excluded_url_patterns", [])
         self.excluded_types = risk_filter.get("excluded_types", [])
         self.require_real_person = risk_filter.get("require_real_person_photo", True)
+        self.min_images_required = (
+            config.get("topic_agent", {})
+            .get("image", {})
+            .get(
+                "min_valid_images_to_continue",
+                config.get("topic_agent", {})
+                .get("image", {})
+                .get("min_images_required", 1),
+            )
+        )
+        self.allow_cover_only_mode = (
+            config.get("topic_agent", {})
+            .get("image", {})
+            .get("allow_cover_only_mode", True)
+        )
+        self.allow_single_high_quality_image = (
+            config.get("topic_agent", {})
+            .get("image", {})
+            .get("allow_single_high_quality_image", True)
+        )
 
     def check_consistency(
         self,
@@ -67,6 +90,17 @@ class ImageConsistencyChecker:
         if not valid_images:
             issues.append("无有效爱豆人物图（全部被风险过滤排除）")
             return self._build_result(0, issues, [], excluded_images, False)
+
+        if len(excluded_images) > len(images) / 2:
+            issues.append(
+                f"超过一半图片不合格({len(excluded_images)}/{len(images)})"
+            )
+            score -= 10
+
+        if len(valid_images) == 1 and (
+            self.allow_cover_only_mode or self.allow_single_high_quality_image
+        ):
+            issues.append("仅1张有效图片，进入封面图模式")
 
         # Step 2: 人物一致性检查
         idol_match, idol_issues = self._check_idol_match(article, valid_images)
@@ -127,6 +161,14 @@ class ImageConsistencyChecker:
             if _is_blocked_image(url, desc):
                 is_risky = True
                 risk_reason = "URL/描述含被禁关键词(audition/ads/logo/banner等)"
+
+            # 视觉质量与相关性由下载阶段产生，排版前必须再次执行硬门槛。
+            if not is_risky and img.get("quality_passed") is False:
+                is_risky = True
+                risk_reason = img.get("quality_reason") or "视觉质量不合格"
+            if not is_risky and img.get("relevance_passed") is False:
+                is_risky = True
+                risk_reason = img.get("relevance_reason") or "图片相关性不足"
 
             # 2. 配置中的 excluded_url_patterns
             if not is_risky:
